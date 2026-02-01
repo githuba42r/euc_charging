@@ -1,0 +1,45 @@
+{
+  "device_name": "Monster Pro",
+  "device_address": "AA:BB:CC:DD:EE:02",
+  "brand": "Gotway",
+  "model": "Monster Pro (30S)",
+  "capture_timestamp": "2024-01-15T16:00:00Z",
+  "scenario": "riding",
+  "packets": [
+    {
+      "timestamp": "2024-01-15T16:00:00.000Z",
+      "raw_hex": "55aadc5a2f6c0008000032000012340000001e2800001234",
+      "decoded": {
+        "protocol": "Gotway",
+        "voltage": 121.00,
+        "speed": 20.0,
+        "trip_distance": 5.0,
+        "total_distance": 4660.0,
+        "current": 3.0,
+        "temperature": 40.0,
+        "battery_percent": 85.0,
+        "is_charging": false,
+        "system_voltage": 126.0,
+        "model": "Monster Pro"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T16:00:01.000Z",
+      "raw_hex": "55aadc5a2f6c0010000032000012340000002850000012345",
+      "decoded": {
+        "protocol": "Gotway",
+        "voltage": 121.00,
+        "speed": 25.0,
+        "trip_distance": 5.001,
+        "total_distance": 4660.0,
+        "current": 4.0,
+        "temperature": 40.5,
+        "battery_percent": 85.0,
+        "is_charging": false,
+        "system_voltage": 126.0,
+        "model": "Monster Pro"
+      }
+    }
+  ],
+  "notes": "Synthetic example showing Gotway Monster Pro (30S) while riding at 20-25 km/h."
+}

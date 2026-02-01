@@ -1,0 +1,62 @@
+{
+  "device_name": "Sherman S",
+  "device_address": "88:25:83:F3:5D:30",
+  "brand": "Veteran",
+  "model": "Sherman S (24S)",
+  "capture_timestamp": "2024-01-15T14:30:00Z",
+  "scenario": "charging",
+  "packets": [
+    {
+      "timestamp": "2024-01-15T14:30:00.000Z",
+      "raw_hex": "dc5a5c14b9010000001a620000ffc6000000002e3d000000001234",
+      "decoded": {
+        "protocol": "Veteran",
+        "voltage": 105.84,
+        "speed": 0.0,
+        "trip_distance": 6.754,
+        "total_distance": 65.478,
+        "current": 0.0,
+        "temperature": 28.5,
+        "battery_percent": 98.5,
+        "is_charging": true,
+        "system_voltage": 100.8,
+        "model": "Sherman S"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T14:30:01.000Z",
+      "raw_hex": "dc5a5c14b8010000001a620000ffc600001400f2e3d000000001234",
+      "decoded": {
+        "protocol": "Veteran",
+        "voltage": 104.72,
+        "speed": 0.0,
+        "trip_distance": 6.754,
+        "total_distance": 65.478,
+        "current": 2.0,
+        "temperature": 28.6,
+        "battery_percent": 97.8,
+        "is_charging": true,
+        "system_voltage": 100.8,
+        "model": "Sherman S"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T14:30:02.000Z",
+      "raw_hex": "dc5a5c14b7010000001a620000ffc600001e00f8e3d000000001234",
+      "decoded": {
+        "protocol": "Veteran",
+        "voltage": 103.59,
+        "speed": 0.0,
+        "trip_distance": 6.754,
+        "total_distance": 65.478,
+        "current": 3.0,
+        "temperature": 28.7,
+        "battery_percent": 96.5,
+        "is_charging": true,
+        "system_voltage": 100.8,
+        "model": "Sherman S"
+      }
+    }
+  ],
+  "notes": "Synthetic example showing Veteran Sherman S during charging. Voltage gradually increasing, current positive, speed zero."
+}

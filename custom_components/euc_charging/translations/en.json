@@ -1,0 +1,61 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Select Leaperkim Device",
+                "description": "Discovered devices:",
+                "data": {
+                    "address": "Device"
+                }
+            },
+            "no_devices": {
+                "title": "No Devices Found",
+                "description": "Could not find any Leaperkim EUC devices.\n\n**Common causes:**\n1. The device is **already connected** to another app (official app, WheelLog, etc) - BLE devices stop advertising when connected\n2. The device is turned off\n3. The device is out of Bluetooth range\n\n**Solutions:**\n- Close any apps that might be connected to the EUC\n- Force stop the official app on your phone\n- Restart the EUC (power off and on)\n- Click **Submit** to scan again\n- Enable **Manual Entry** to enter the MAC address directly\n- Enable **Show All Devices** to see all Bluetooth devices for debugging",
+                "data": {
+                    "manual_entry": "Enter MAC address manually",
+                    "show_all": "Show all Bluetooth devices (debug)"
+                }
+            },
+            "manual": {
+                "title": "Manual Device Entry",
+                "description": "Enter the Bluetooth MAC address of your EUC.\n\nYou can find this by:\n1. Using the official app\n2. Running `bluetoothctl` and scanning for devices\n3. Checking your phone's Bluetooth settings",
+                "data": {
+                    "address": "MAC Address (e.g., 88:25:83:F3:5D:30)"
+                }
+            },
+            "bluetooth_confirm": {
+                "title": "Confirm Device",
+                "description": "Do you want to add the device **{name}**?"
+            }
+        },
+        "error": {
+            "no_devices_found": "No devices found.",
+            "invalid_mac": "Invalid MAC address format. Use format: XX:XX:XX:XX:XX:XX"
+        },
+        "abort": {
+            "already_configured": "Device is already configured",
+            "no_devices_found": "No devices found",
+            "not_supported": "This device is not supported"
+        }
+    },
+    "entity": {
+        "sensor": {
+            "charge_time_to_80": {
+                "name": "Time to 80%"
+            },
+            "charge_time_to_90": {
+                "name": "Time to 90%"
+            },
+            "charge_time_to_95": {
+                "name": "Time to 95%"
+            },
+            "charge_time_to_100": {
+                "name": "Time to 100%"
+            },
+            "charge_rate": {
+                "name": "Charge Rate"
+            }
+        }
+    }
+}
+

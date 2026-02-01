@@ -1,0 +1,45 @@
+{
+  "device_name": "KS-S18",
+  "device_address": "AA:BB:CC:DD:EE:01",
+  "brand": "KingSong",
+  "model": "KS-S18 (20S)",
+  "capture_timestamp": "2024-01-15T15:00:00Z",
+  "scenario": "idle",
+  "packets": [
+    {
+      "timestamp": "2024-01-15T15:00:00.000Z",
+      "raw_hex": "aa55145aa914a0000000c801f40000001e5a00001234",
+      "decoded": {
+        "protocol": "KingSong",
+        "voltage": 52.80,
+        "speed": 0.0,
+        "trip_distance": 0.2,
+        "total_distance": 500.0,
+        "current": 0.3,
+        "temperature": 25.0,
+        "battery_percent": 42.5,
+        "is_charging": false,
+        "system_voltage": 84.0,
+        "model": "KS-S18"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T15:00:01.000Z",
+      "raw_hex": "aa55145aa914a0000000c801f40000001e5a00001234",
+      "decoded": {
+        "protocol": "KingSong",
+        "voltage": 52.80,
+        "speed": 0.0,
+        "trip_distance": 0.2,
+        "total_distance": 500.0,
+        "current": 0.3,
+        "temperature": 25.0,
+        "battery_percent": 42.5,
+        "is_charging": false,
+        "system_voltage": 84.0,
+        "model": "KS-S18"
+      }
+    }
+  ],
+  "notes": "Synthetic example showing KingSong S18 at idle with 20S battery configuration."
+}
