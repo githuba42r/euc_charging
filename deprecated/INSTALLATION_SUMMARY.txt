@@ -1,0 +1,347 @@
+================================================================================
+LEAPERKIM SHERMAN S BLUETOOTH LE CLIENT - INSTALLATION SUMMARY
+================================================================================
+
+PROJECT CREATED: 2026-01-25
+STATUS: ✅ READY TO USE
+
+================================================================================
+WHAT WAS CREATED
+================================================================================
+
+Core Application Files:
+  ✅ discover.js         - BLE service discovery script
+  ✅ client.js           - Main BLE client for data collection
+  ✅ decoder.js          - Battery data parsing library
+  ✅ test-decoder.js     - Decoder test harness
+  ✅ config.js           - Configuration template
+
+Configuration Files:
+  ✅ package.json        - Node.js project configuration
+  ✅ setup.sh            - Setup and dependency checker
+
+Documentation Files:
+  ✅ INDEX.md                     - Project overview (START HERE)
+  ✅ GETTING_STARTED.md           - Step-by-step guide
+  ✅ QUICK_REFERENCE.md           - Command cheat sheet
+  ✅ README.md                    - Project details
+  ✅ REVERSE_ENGINEERING.md       - Technical protocol guide
+  ✅ ESPHOME_GUIDE.md             - Home Assistant integration
+  ✅ INSTALLATION_SUMMARY.txt     - This file
+
+Dependencies Installed:
+  ✅ noble               - Bluetooth LE library (v1.9.1)
+
+================================================================================
+HOW TO GET STARTED
+================================================================================
+
+STEP 1: Run Initial Setup
+  cd /home/philg/working/euc-dump
+  ./setup.sh
+
+STEP 2: Discover Your Device
+  sudo node discover.js
+  
+  This will:
+  - Scan for your device (MAC: 88:25:83:F3:5D:30)
+  - Show all available services and characteristics
+  - Take about 30 seconds
+
+STEP 3: Capture Battery Data
+  sudo node client.js
+  
+  This will:
+  - Connect to your device
+  - Subscribe to battery notifications
+  - Log all data to battery_data.log
+  - Keep running while device charges (5-10 minutes recommended)
+  - Stop with: Ctrl+C
+
+STEP 4: Analyze Captured Data
+  node test-decoder.js
+  
+  This will:
+  - Parse your captured data
+  - Show possible battery metrics
+  - Validate the data format
+
+================================================================================
+WHAT THE CODE DOES
+================================================================================
+
+discover.js
+-----------
+Purpose: Find your device and enumerate all BLE services
+Usage:   sudo node discover.js
+Output:  Console display + enumeration of services/characteristics
+Notes:   One-time process to understand device capabilities
+
+client.js
+---------
+Purpose: Connect to device and collect battery data
+Usage:   sudo node client.js
+Output:  Real-time data display + battery_data.log file
+Notes:   Can run multiple times to collect more data
+
+decoder.js
+----------
+Purpose: Parse raw BLE data into battery metrics
+Usage:   Imported by client.js and test-decoder.js
+Output:  Battery level, voltage, current
+Notes:   Automatically tests multiple data interpretations
+
+test-decoder.js
+---------------
+Purpose: Test the decoder with synthetic and real data
+Usage:   node test-decoder.js
+Output:  Analysis results with confidence scores
+Notes:   No sudo needed - works with logged data
+
+================================================================================
+EXPECTED WORKFLOW
+================================================================================
+
+1. DISCOVERY (30 seconds)
+   sudo node discover.js
+   → Record service UUIDs and characteristic UUIDs
+   
+2. DATA CAPTURE (5-10 minutes)
+   Keep device connected to charger
+   sudo node client.js
+   → Captures battery data to battery_data.log
+   
+3. ANALYSIS (immediate)
+   node test-decoder.js
+   → Shows battery level, voltage, current interpretations
+   
+4. VALIDATION
+   Compare decoder output against device's built-in display
+   → Verify voltage and current values match
+   
+5. DOCUMENTATION
+   Update config.js with discovered protocol details
+   → Record service UUIDs, characteristic UUIDs, data format
+
+6. INTEGRATION (Future)
+   Deploy to ESPHome for Home Assistant integration
+   → See ESPHOME_GUIDE.md
+
+================================================================================
+DEVICE INFORMATION
+================================================================================
+
+Device Name:     Leaperkim Sherman S Electric Unicycle
+MAC Address:     88:25:83:F3:5D:30
+Data Needed:     Battery Level (%), Voltage (V), Current (A)
+Expected Values: Level 0-100%, Voltage 45-67V, Current 0-5A
+
+================================================================================
+SYSTEM REQUIREMENTS
+================================================================================
+
+Operating System:  Linux, macOS, or Windows with Bluetooth
+Node.js:          v14 or later
+npm:              v6 or later
+Bluetooth:        Built-in adapter or USB dongle
+Permissions:      sudo access (for Bluetooth operations)
+
+Tested With:
+  ✅ Node.js v20.19.0
+  ✅ npm 10.8.2
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+1. SUDO REQUIRED
+   All BLE operations (discover, client) require elevated privileges:
+   - Either run with: sudo node discover.js
+   - Or add user to bluetooth group (see TROUBLESHOOTING)
+
+2. DEVICE MUST BE POWERED ON
+   The Leaperkim device must be powered on and in BLE range
+   for discovery to work
+
+3. OPTIMAL TIMING FOR DATA
+   While device is charging, battery data is most interesting
+   Connect your device to a charger before running client.js
+
+4. DATA PERSISTENCE
+   battery_data.log is created in the project directory
+   Contains all captured BLE data for analysis
+
+5. NO SENSITIVE DATA
+   No credentials, passwords, or keys are stored
+   All data is local and device communication is via Bluetooth
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+Immediate (Today):
+  □ Read INDEX.md or GETTING_STARTED.md
+  □ Run: sudo node discover.js
+  □ Record the output (service/characteristic UUIDs)
+
+Short Term (This Week):
+  □ Run: sudo node client.js while device charges
+  □ Capture data for 5-10 minutes
+  □ Run: node test-decoder.js to analyze
+  □ Update config.js with discovered values
+
+Medium Term (This Month):
+  □ Document complete protocol in REVERSE_ENGINEERING.md
+  □ Verify decoder works correctly with real device data
+  □ Create Node.js client that reliably reads battery metrics
+
+Long Term (Future):
+  □ Set up ESPHome device for Bluetooth proxy
+  □ Integrate with Home Assistant
+  □ Create battery monitoring automations
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+"Device not found"
+  → Check device is powered on
+  → Check Bluetooth is enabled: bluetoothctl show
+  → Try manual scan: bluetoothctl scan on
+
+"Permission denied"
+  → Run with sudo: sudo node discover.js
+  → OR add user to group: sudo usermod -a -G bluetooth $USER
+
+"No data received"
+  → Device may not be advertising
+  → May require pairing first
+  → Try: bluetoothctl connect 88:25:83:F3:5D:30
+
+For more help, see REVERSE_ENGINEERING.md or contact the project maintainer.
+
+================================================================================
+FILE LOCATIONS
+================================================================================
+
+Project Root:     /home/philg/working/euc-dump/
+Main Scripts:     discover.js, client.js, decoder.js, test-decoder.js
+Configuration:    config.js, package.json
+Documentation:    INDEX.md, GETTING_STARTED.md, *.md files
+Captured Data:    battery_data.log (created after running client.js)
+Node Modules:     node_modules/ (created by npm install)
+
+================================================================================
+USEFUL COMMANDS
+================================================================================
+
+# Check Node.js
+node --version
+npm --version
+
+# Install dependencies
+npm install
+
+# Run discovery
+sudo node discover.js
+
+# Capture data
+sudo node client.js
+
+# Analyze captured data
+node test-decoder.js
+
+# View captured data
+cat battery_data.log
+
+# Watch data in real-time (while client is running)
+tail -f battery_data.log
+
+# Use npm scripts
+npm run discover   # Alias for: sudo node discover.js
+npm run client     # Alias for: sudo node client.js
+npm run analyze    # Alias for: node test-decoder.js
+
+================================================================================
+PROJECT STRUCTURE
+================================================================================
+
+euc-dump/
+  │
+  ├── Application Files
+  │   ├── discover.js              ← Start here for device discovery
+  │   ├── client.js                ← Main BLE client
+  │   ├── decoder.js               ← Data parsing library
+  │   ├── test-decoder.js          ← Test/analysis tool
+  │   └── config.js                ← Configuration template
+  │
+  ├── Configuration
+  │   ├── package.json             ← Node.js config
+  │   └── setup.sh                 ← Setup script
+  │
+  ├── Documentation
+  │   ├── INDEX.md                 ← Project overview (START)
+  │   ├── GETTING_STARTED.md       ← Step-by-step guide
+  │   ├── QUICK_REFERENCE.md       ← Command reference
+  │   ├── README.md                ← Project details
+  │   ├── REVERSE_ENGINEERING.md   ← Protocol documentation
+  │   ├── ESPHOME_GUIDE.md         ← Home Assistant guide
+  │   └── INSTALLATION_SUMMARY.txt ← This file
+  │
+  ├── Generated (during execution)
+  │   └── battery_data.log         ← Captured device data
+  │
+  └── Dependencies
+      └── node_modules/            ← npm packages (created by: npm install)
+
+================================================================================
+SUPPORT RESOURCES
+================================================================================
+
+Documentation:
+  - Read INDEX.md for overview
+  - Read GETTING_STARTED.md for step-by-step guide
+  - Read QUICK_REFERENCE.md for commands
+  - Read REVERSE_ENGINEERING.md for technical details
+
+Related Projects:
+  - King Song wheel reverse engineering (similar protocol)
+  - Inmotion wheel BLE analysis (reference implementation)
+  - Gotway wheel communication (protocol documentation)
+
+Tools:
+  - nRF Connect (Android app for BLE scanning)
+  - Wireshark (packet capture and analysis)
+  - bluetoothctl (Linux Bluetooth control)
+
+================================================================================
+VERSION INFORMATION
+================================================================================
+
+Project Version:  1.0.0
+Created:          2026-01-25
+Status:           READY FOR USE
+
+Dependencies:
+  - noble: ^1.9.1
+
+Requirements:
+  - Node.js: v14+
+  - npm: v6+
+  - Bluetooth: Linux/Mac/Windows
+
+================================================================================
+NEXT ACTION
+================================================================================
+
+READ THIS FIRST:
+  cat INDEX.md
+
+THEN RUN THIS:
+  sudo node discover.js
+
+Then continue with GETTING_STARTED.md
+
+================================================================================
+Good luck! 🚀
+================================================================================
