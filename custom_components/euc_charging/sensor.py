@@ -118,7 +118,7 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         value_fn=lambda data: (
             data.get("charge_estimates").charge_rate_pct 
             if data.get("charge_estimates") and data.get("is_charging") 
-            and data.get("charge_estimates").charge_rate_pct > 0 else None
+            and data.get("charge_estimates").charge_rate_pct is not None else None
         ),
     ),
 )

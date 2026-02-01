@@ -28,10 +28,14 @@ class ChargeEstimates:
             minutes: Time in minutes
             
         Returns:
-            Formatted string like "1:42 hr" or None if minutes is None
+            Formatted string like "1:42 hr", "--" for < 1 minute, or None if minutes is None
         """
         if minutes is None:
             return None
+        
+        # Display "--" for values less than 1 minute (target reached or nearly there)
+        if minutes < 1:
+            return "--"
         
         if minutes < 60:
             return f"0:{minutes:02d} hr"
@@ -231,6 +235,24 @@ class ChargeTracker:
                 battery_percent
             )
         
+        # Special case: If battery is at or very near 100%, return estimates immediately
+        # No need to wait for data collection or calculate rates
+        if battery_percent >= 99.5:
+            estimates = ChargeEstimates(
+                charge_rate_pct=0.0,
+                averaging_window="instant",
+            )
+            estimates.time_to_80 = 0
+            estimates.time_to_90 = 0
+            estimates.time_to_95 = 0
+            estimates.time_to_100 = 0
+            self._last_estimate = estimates
+            _LOGGER.debug(
+                "Battery at %.1f%%, returning immediate estimates (all zeros)",
+                battery_percent
+            )
+            return estimates
+        
         # Check if enough time has passed since last update to prevent jumping values
         # Always calculate on first estimate or when window would change
         time_since_last_update = now - self._last_update_time
@@ -282,7 +304,7 @@ class ChargeTracker:
         # Calculate rate using data from the selected time window
         raw_rate_pct_min = self._calculate_rate_for_window(selected_window_seconds)
         
-        # If rate is negative or too small, return previous estimates
+        # If rate is negative or too small, return previous estimates or special case
         if raw_rate_pct_min is None or raw_rate_pct_min <= 0.001:
             # Only warn if battery is not nearly full (when low/negative rates are expected)
             if raw_rate_pct_min is not None and raw_rate_pct_min <= 0.001 and battery_percent < 99.0:
@@ -296,6 +318,25 @@ class ChargeTracker:
                     "Battery nearly full (%.1f%%), charge rate very low: %.4f %%/min - this is normal",
                     battery_percent, raw_rate_pct_min
                 )
+            
+            # Safety net: If battery reached 100% during charging, return zeros
+            # This shouldn't normally be reached as we check at the start
+            if battery_percent >= 99.5:
+                estimates = ChargeEstimates(
+                    charge_rate_pct=0.0,
+                    averaging_window=selected_window_name,
+                )
+                estimates.time_to_80 = 0
+                estimates.time_to_90 = 0
+                estimates.time_to_95 = 0
+                estimates.time_to_100 = 0
+                self._last_estimate = estimates
+                _LOGGER.debug(
+                    "Battery at %.1f%%, setting all time estimates to 0",
+                    battery_percent
+                )
+                return estimates
+            
             return self._last_estimate or ChargeEstimates()
 
         # Apply exponential smoothing to the rate to prevent rapid changes
@@ -322,17 +363,22 @@ class ChargeTracker:
         current_soc = battery_percent
         
         # Calculate time to each target using the charge curve model
-        estimates.time_to_80 = LiIonChargeModel.estimate_time_to_target(
-            current_soc, 80.0, rate_pct_min
+        # Return 0 if already at or above target, otherwise calculate
+        estimates.time_to_80 = (
+            LiIonChargeModel.estimate_time_to_target(current_soc, 80.0, rate_pct_min)
+            if current_soc < 80.0 else 0
         )
-        estimates.time_to_90 = LiIonChargeModel.estimate_time_to_target(
-            current_soc, 90.0, rate_pct_min
+        estimates.time_to_90 = (
+            LiIonChargeModel.estimate_time_to_target(current_soc, 90.0, rate_pct_min)
+            if current_soc < 90.0 else 0
         )
-        estimates.time_to_95 = LiIonChargeModel.estimate_time_to_target(
-            current_soc, 95.0, rate_pct_min
+        estimates.time_to_95 = (
+            LiIonChargeModel.estimate_time_to_target(current_soc, 95.0, rate_pct_min)
+            if current_soc < 95.0 else 0
         )
-        estimates.time_to_100 = LiIonChargeModel.estimate_time_to_target(
-            current_soc, 100.0, rate_pct_min
+        estimates.time_to_100 = (
+            LiIonChargeModel.estimate_time_to_target(current_soc, 100.0, rate_pct_min)
+            if current_soc < 100.0 else 0
         )
         
         # Log when we first get valid estimates, when window changes, or periodically
