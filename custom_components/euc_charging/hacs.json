@@ -1,9 +1,0 @@
-{
-  "name": "EUC Charging Monitor",
-  "content_in_root": false,
-  "render_readme": true,
-  "homeassistant": "2023.1.0",
-  "country": ["US", "GB", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "CH", "SE", "NO", "DK", "FI", "PL", "CZ", "RU", "CN", "JP", "KR", "AU", "NZ", "CA"],
-  "zip_release": false,
-  "filename": "euc_charging.zip"
-}
