@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from bleak import BleakClient
@@ -71,6 +72,15 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._read_uuid: str | None = None
         self._write_uuid: str | None = None
         self._requires_keepalive = False
+        self.auto_connect_enabled = True  # Default to enabled
+        self._reconnect_event = asyncio.Event()
+        
+        # Store last known values (persist even when disconnected)
+        self.last_connected_time: datetime | None = None
+        self.last_voltage: float | None = None
+        self.last_battery_percent: float | None = None
+        self.last_trip_distance: float | None = None
+        self.last_total_distance: float | None = None
 
     def _setup_uuids_for_brand(self, brand: WheelBrand) -> None:
         """Set up read/write UUIDs and keepalive requirements based on brand."""
@@ -195,6 +205,27 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Main connection loop."""
         while True:
             try:
+                # Check if auto-connect is disabled
+                if not self.auto_connect_enabled:
+                    # If currently connected, disconnect
+                    if self.client and self.client.is_connected:
+                        _LOGGER.info("Auto-connect disabled, disconnecting from %s", self.ble_device.address)
+                        try:
+                            read_uuid = self._read_uuid or NOTIFY_UUID
+                            await self.client.stop_notify(read_uuid)
+                            await self.client.disconnect()
+                        except (BleakError, asyncio.TimeoutError) as ex:
+                            _LOGGER.debug("Error during disconnect: %s", ex)
+                        self.client = None
+                    
+                    # Wait for reconnect event or check again in 5 seconds
+                    try:
+                        await asyncio.wait_for(self._reconnect_event.wait(), timeout=5.0)
+                        self._reconnect_event.clear()
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                
                 # If already connected, just sleep and continue
                 if self.client and self.client.is_connected:
                     await asyncio.sleep(5)
@@ -314,6 +345,13 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             telemetry = self.decoder.decode(byte_data)
             if telemetry:
+                # Update last connected time and store last known values
+                self.last_connected_time = datetime.now()
+                self.last_voltage = telemetry.get("voltage")
+                self.last_battery_percent = telemetry.get("battery_percent")
+                self.last_trip_distance = telemetry.get("trip_distance")
+                self.last_total_distance = telemetry.get("total_distance")
+                
                 # Add charge estimates with voltage data
                 estimates = self.charge_tracker.update(
                     telemetry.get("battery_percent", 0),
@@ -321,6 +359,9 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     telemetry.get("voltage", 0)
                 )
                 telemetry["charge_estimates"] = estimates
+                
+                # Add last connected time to telemetry
+                telemetry["last_connected_time"] = self.last_connected_time
                 
                 self.async_set_updated_data(telemetry)
                 
@@ -343,6 +384,21 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as ex:
             _LOGGER.error("Error decoding packet: %s", ex)
+
+    def trigger_reconnect(self) -> None:
+        """Trigger a reconnection attempt."""
+        self._reconnect_event.set()
+
+    async def disconnect(self) -> None:
+        """Disconnect from the EUC."""
+        if self.client and self.client.is_connected:
+            try:
+                read_uuid = self._read_uuid or NOTIFY_UUID
+                await self.client.stop_notify(read_uuid)
+                await self.client.disconnect()
+            except (BleakError, asyncio.TimeoutError) as ex:
+                _LOGGER.debug("Error during disconnect: %s", ex)
+            self.client = None
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""

@@ -24,6 +24,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from datetime import datetime
 
 from .const import DOMAIN
 from .coordinator import EucChargingCoordinator
@@ -121,6 +122,52 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
             and data.get("charge_estimates").charge_rate_pct is not None else None
         ),
     ),
+    # Last connected/updated sensors (persist even when disconnected)
+    EucChargingSensorDescription(
+        key="last_connected_time",
+        name="Last Connected",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda data: data.get("last_connected_time"),
+    ),
+    EucChargingSensorDescription(
+        key="last_voltage",
+        name="Last Voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        suggested_display_precision=2,
+        icon="mdi:battery-clock",
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: None,  # We'll override this in the sensor class
+    ),
+    EucChargingSensorDescription(
+        key="last_battery_percent",
+        name="Last Battery",
+        device_class=SensorDeviceClass.BATTERY,
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:battery-clock",
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: None,  # We'll override this in the sensor class
+    ),
+    EucChargingSensorDescription(
+        key="last_trip_distance",
+        name="Last Trip Distance",
+        device_class=SensorDeviceClass.DISTANCE,
+        native_unit_of_measurement=UnitOfLength.KILOMETERS,
+        suggested_display_precision=2,
+        icon="mdi:map-marker-distance",
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: None,  # We'll override this in the sensor class
+    ),
+    EucChargingSensorDescription(
+        key="last_total_distance",
+        name="Last Total Distance",
+        device_class=SensorDeviceClass.DISTANCE,
+        native_unit_of_measurement=UnitOfLength.KILOMETERS,
+        suggested_display_precision=2,
+        icon="mdi:counter",
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: None,  # We'll override this in the sensor class
+    ),
 )
 
 
@@ -171,6 +218,17 @@ class EucChargingSensor(CoordinatorEntity[EucChargingCoordinator], SensorEntity)
     @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
+        # Handle "last known" sensors specially - they read from coordinator's stored values
+        if self.entity_description.key == "last_voltage":
+            return self.coordinator.last_voltage
+        elif self.entity_description.key == "last_battery_percent":
+            return self.coordinator.last_battery_percent
+        elif self.entity_description.key == "last_trip_distance":
+            return self.coordinator.last_trip_distance
+        elif self.entity_description.key == "last_total_distance":
+            return self.coordinator.last_total_distance
+        
+        # All other sensors use the normal value_fn
         if not self.coordinator.data:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
