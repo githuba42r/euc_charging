@@ -28,12 +28,16 @@ class ChargeEstimates:
             minutes: Time in minutes
             
         Returns:
-            Formatted string like "1:42 hr", "--" for < 1 minute, or None if minutes is None
+            Formatted string like "1:42 hr", "0:00 hr" for 0 minutes, or None if minutes is None
         """
         if minutes is None:
             return None
         
-        # Display "--" for values less than 1 minute (target reached or nearly there)
+        # Display "0:00 hr" for 0 minutes (target reached or not charging)
+        if minutes == 0:
+            return "0:00 hr"
+        
+        # Display "--" for values less than 1 minute but greater than 0 (nearly there)
         if minutes < 1:
             return "--"
         

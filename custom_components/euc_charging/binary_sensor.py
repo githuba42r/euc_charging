@@ -16,7 +16,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, sanitize_wheel_id
 from .coordinator import EucChargingCoordinator
 
 
@@ -31,7 +31,7 @@ BINARY_SENSORS: tuple[EucChargingBinarySensorDescription, ...] = (
         key="is_charging",
         name="Charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
-        value_fn=lambda data: data.get("is_charging"),
+        value_fn=lambda data: data.get("is_charging", False),  # Default to False if not present
     ),
 )
 
@@ -53,6 +53,7 @@ class EucChargingBinarySensor(CoordinatorEntity[EucChargingCoordinator], BinaryS
     """Representation of a Leaperkim Binary Sensor."""
 
     entity_description: EucChargingBinarySensorDescription
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -62,7 +63,13 @@ class EucChargingBinarySensor(CoordinatorEntity[EucChargingCoordinator], BinaryS
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        
+        # Generate unique_id using MAC address for persistence
         self._attr_unique_id = f"{coordinator.ble_device.address}_{description.key}"
+        
+        # Set suggested_object_id to include wheel identifier for better entity IDs
+        wheel_id = sanitize_wheel_id(coordinator.ble_device.name or "euc")
+        self._attr_suggested_object_id = f"euc_{wheel_id}_{description.key}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -81,8 +88,21 @@ class EucChargingBinarySensor(CoordinatorEntity[EucChargingCoordinator], BinaryS
         )
 
     @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        # Charging sensor should always be available (shows Off when disconnected)
+        # This ensures it shows as "off" rather than "unknown" when disconnected
+        return True
+
+    @property
     def is_on(self) -> bool | None:
         """Return true if the binary sensor is on."""
         if not self.coordinator.data:
-            return None
-        return self.entity_description.value_fn(self.coordinator.data)
+            # When disconnected, show as Off instead of Unknown
+            return False
+        # For is_charging, default to False if not explicitly set
+        # This ensures we show Off instead of Unknown when connected but not charging
+        result = self.entity_description.value_fn(self.coordinator.data)
+        if self.entity_description.key == "is_charging" and result is None:
+            return False
+        return result

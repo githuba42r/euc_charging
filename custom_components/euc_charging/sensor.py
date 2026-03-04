@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Any
 
@@ -26,9 +27,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime
 
-from .const import DOMAIN
+from .const import DOMAIN, sanitize_wheel_id
 from .coordinator import EucChargingCoordinator
 from .charge_tracker import ChargeEstimates
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,7 +82,8 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         icon="mdi:battery-charging-80",
         value_fn=lambda data: (
             data.get("charge_estimates").time_to_80_formatted 
-            if data.get("charge_estimates") and data.get("is_charging") else None
+            if data.get("charge_estimates") and data.get("is_charging") 
+            else "0:00 hr"  # Show 0:00 when not charging
         ),
     ),
     EucChargingSensorDescription(
@@ -88,7 +92,8 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         icon="mdi:battery-charging-90",
         value_fn=lambda data: (
             data.get("charge_estimates").time_to_90_formatted 
-            if data.get("charge_estimates") and data.get("is_charging") else None
+            if data.get("charge_estimates") and data.get("is_charging") 
+            else "0:00 hr"  # Show 0:00 when not charging
         ),
     ),
     EucChargingSensorDescription(
@@ -97,7 +102,8 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         icon="mdi:battery-charging-high",
         value_fn=lambda data: (
             data.get("charge_estimates").time_to_95_formatted 
-            if data.get("charge_estimates") and data.get("is_charging") else None
+            if data.get("charge_estimates") and data.get("is_charging") 
+            else "0:00 hr"  # Show 0:00 when not charging
         ),
     ),
     EucChargingSensorDescription(
@@ -106,7 +112,8 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         icon="mdi:battery-charging-100",
         value_fn=lambda data: (
             data.get("charge_estimates").time_to_100_formatted 
-            if data.get("charge_estimates") and data.get("is_charging") else None
+            if data.get("charge_estimates") and data.get("is_charging") 
+            else "0:00 hr"  # Show 0:00 when not charging
         ),
     ),
     EucChargingSensorDescription(
@@ -119,14 +126,15 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         value_fn=lambda data: (
             data.get("charge_estimates").charge_rate_pct 
             if data.get("charge_estimates") and data.get("is_charging") 
-            and data.get("charge_estimates").charge_rate_pct is not None else None
+            and data.get("charge_estimates").charge_rate_pct is not None 
+            else 0  # Show 0 when not charging instead of None/Unknown
         ),
     ),
     # Last connected/updated sensors (persist even when disconnected)
     EucChargingSensorDescription(
         key="last_connected_time",
         name="Last Connected",
-        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:clock-outline",
         value_fn=lambda data: data.get("last_connected_time"),
     ),
     EucChargingSensorDescription(
@@ -188,6 +196,7 @@ class EucChargingSensor(CoordinatorEntity[EucChargingCoordinator], SensorEntity)
     """Representation of a Leaperkim Sensor."""
 
     entity_description: EucChargingSensorDescription
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -197,7 +206,13 @@ class EucChargingSensor(CoordinatorEntity[EucChargingCoordinator], SensorEntity)
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        
+        # Generate unique_id using MAC address for persistence
         self._attr_unique_id = f"{coordinator.ble_device.address}_{description.key}"
+        
+        # Set suggested_object_id to include wheel identifier for better entity IDs
+        wheel_id = sanitize_wheel_id(coordinator.ble_device.name or "euc")
+        self._attr_suggested_object_id = f"euc_{wheel_id}_{description.key}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -216,17 +231,46 @@ class EucChargingSensor(CoordinatorEntity[EucChargingCoordinator], SensorEntity)
         )
 
     @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        # "Last known" sensors should always be available once enabled
+        # They will show None until the wheel connects for the first time
+        if self.entity_description.key in (
+            "last_voltage",
+            "last_battery_percent",
+            "last_trip_distance",
+            "last_total_distance",
+            "last_connected_time",
+        ):
+            # Always available - will show as having no value until wheel connects
+            return True
+        
+        # All other sensors require active connection (data must exist)
+        return self.coordinator.data is not None
+
+    @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
         # Handle "last known" sensors specially - they read from coordinator's stored values
         if self.entity_description.key == "last_voltage":
-            return self.coordinator.last_voltage
+            value = self.coordinator.last_voltage
+            _LOGGER.debug("last_voltage sensor value: %s", value)
+            return value
         elif self.entity_description.key == "last_battery_percent":
-            return self.coordinator.last_battery_percent
+            value = self.coordinator.last_battery_percent
+            _LOGGER.debug("last_battery_percent sensor value: %s", value)
+            return value
         elif self.entity_description.key == "last_trip_distance":
             return self.coordinator.last_trip_distance
         elif self.entity_description.key == "last_total_distance":
             return self.coordinator.last_total_distance
+        elif self.entity_description.key == "last_connected_time":
+            value = self.coordinator.last_connected_time
+            _LOGGER.debug("last_connected_time sensor value: %s", value)
+            # Format as readable date/time string (e.g., "2026-03-04 12:29:26")
+            if value:
+                return value.strftime("%Y-%m-%d %H:%M:%S")
+            return None
         
         # All other sensors use the normal value_fn
         if not self.coordinator.data:

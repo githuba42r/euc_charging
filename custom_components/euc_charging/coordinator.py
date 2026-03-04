@@ -23,6 +23,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN, NOTIFY_UUID, CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT,
@@ -210,6 +211,20 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # If currently connected, disconnect
                     if self.client and self.client.is_connected:
                         _LOGGER.info("Auto-connect disabled, disconnecting from %s", self.ble_device.address)
+                        
+                        # Save current values to last_* properties before disconnecting
+                        if self.data:
+                            _LOGGER.debug(
+                                "Saving last known values on manual disconnect: battery=%.1f%%, voltage=%.2fV",
+                                self.data.get("battery_percent", 0),
+                                self.data.get("voltage", 0)
+                            )
+                            self.last_voltage = self.data.get("voltage", self.last_voltage)
+                            self.last_battery_percent = self.data.get("battery_percent", self.last_battery_percent)
+                            self.last_trip_distance = self.data.get("trip_distance", self.last_trip_distance)
+                            self.last_total_distance = self.data.get("total_distance", self.last_total_distance)
+                            self.last_connected_time = dt_util.now()
+                        
                         try:
                             read_uuid = self._read_uuid or NOTIFY_UUID
                             await self.client.stop_notify(read_uuid)
@@ -217,6 +232,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         except (BleakError, asyncio.TimeoutError) as ex:
                             _LOGGER.debug("Error during disconnect: %s", ex)
                         self.client = None
+                        
+                        # Clear data so sensors become unavailable (except "last_*" sensors which persist)
+                        # This will trigger all listeners to update, including the "last_*" sensors
+                        self.async_set_updated_data(None)
                     
                     # Wait for reconnect event or check again in 5 seconds
                     try:
@@ -261,6 +280,8 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Device %s not found after 5 minutes, will retry...",
                         self.ble_device.address
                     )
+                    # Clear data so sensors become unavailable (except "last_*" sensors which persist)
+                    self.async_set_updated_data(None)
                     self.async_set_update_error(
                         Exception("Device not available - is it powered on?")
                     )
@@ -305,6 +326,8 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             except (BleakError, asyncio.TimeoutError) as ex:
                 _LOGGER.warning("Connection failed: %s, will retry...", ex)
+                # Clear data so sensors become unavailable (except "last_*" sensors which persist)
+                self.async_set_updated_data(None)
                 self.async_set_update_error(ex)
                 await asyncio.sleep(10)  # Wait before retry
             
@@ -321,9 +344,43 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _disconnected_callback(self, client: BleakClient) -> None:
         """Handle disconnection."""
         _LOGGER.info("Disconnected from %s", client.address)
+        
+        # Save current values to last_* properties before clearing data
+        # Use self.data if available, otherwise keep existing last_* values
+        if self.data:
+            _LOGGER.debug(
+                "Saving last known values on disconnect: battery=%.1f%%, voltage=%.2fV, total_distance=%.2fkm",
+                self.data.get("battery_percent", 0),
+                self.data.get("voltage", 0),
+                self.data.get("total_distance", 0)
+            )
+            self.last_voltage = self.data.get("voltage", self.last_voltage)
+            self.last_battery_percent = self.data.get("battery_percent", self.last_battery_percent)
+            self.last_trip_distance = self.data.get("trip_distance", self.last_trip_distance)
+            self.last_total_distance = self.data.get("total_distance", self.last_total_distance)
+        else:
+            _LOGGER.warning(
+                "No data available on disconnect, keeping existing last known values: "
+                "battery=%.1f%%, voltage=%.2fV, total_distance=%.2fkm",
+                self.last_battery_percent or 0,
+                self.last_voltage or 0,
+                self.last_total_distance or 0
+            )
+        
+        # Update last connected time to disconnect time
+        self.last_connected_time = dt_util.now()
+        _LOGGER.info(
+            "Updated last_connected_time to %s (disconnect time)",
+            self.last_connected_time.isoformat() if self.last_connected_time else "None"
+        )
+        
         # Clear the device available event so we wait for it to be rediscovered
         self._device_available.clear()
         self._device_seen_recently = False
+        
+        # Clear data so sensors become unavailable (except "last_*" sensors which persist)
+        # This will trigger all listeners to update, including the "last_*" sensors
+        self.async_set_updated_data(None)
         self.async_set_update_error(Exception("Disconnected"))
 
     @callback
@@ -346,7 +403,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             telemetry = self.decoder.decode(byte_data)
             if telemetry:
                 # Update last connected time and store last known values
-                self.last_connected_time = datetime.now()
+                self.last_connected_time = dt_util.now()
                 self.last_voltage = telemetry.get("voltage")
                 self.last_battery_percent = telemetry.get("battery_percent")
                 self.last_trip_distance = telemetry.get("trip_distance")

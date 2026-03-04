@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
 
-from .const import DOMAIN
+from .const import DOMAIN, sanitize_wheel_id
 from .coordinator import EucChargingCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,7 +38,14 @@ class EucAutoConnectSwitch(SwitchEntity):
         """Initialize the switch."""
         self._coordinator = coordinator
         self._entry = entry
+        
+        # Generate unique_id using entry_id for persistence
         self._attr_unique_id = f"{entry.entry_id}_auto_connect"
+        
+        # Set suggested_object_id to include wheel identifier for better entity IDs
+        wheel_id = sanitize_wheel_id(coordinator.ble_device.name or "euc")
+        self._attr_suggested_object_id = f"euc_{wheel_id}_auto_connect"
+        
         self._attr_is_on = True  # Default to enabled
         
         # Initialize the coordinator's auto-connect state
