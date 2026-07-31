@@ -23,10 +23,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN, NOTIFY_UUID, CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT,
+    STORAGE_VERSION, STORAGE_SAVE_DELAY,
     KINGSONG_READ_UUID, GOTWAY_READ_UUID, VETERAN_READ_UUID,
     INMOTION_READ_UUID, INMOTION_WRITE_UUID,
     INMOTION_V2_READ_UUID, INMOTION_V2_WRITE_UUID,
@@ -82,6 +84,57 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_battery_percent: float | None = None
         self.last_trip_distance: float | None = None
         self.last_total_distance: float | None = None
+
+        # Backing store so the last known values also survive a Home Assistant restart
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
+        )
+
+    async def _async_load_last_known(self) -> None:
+        """Restore the last known values from disk."""
+        try:
+            stored = await self._store.async_load()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Failed to load stored last known values")
+            return
+
+        if not stored:
+            _LOGGER.debug("No stored last known values for %s", self.ble_device.address)
+            return
+
+        self.last_voltage = stored.get("last_voltage")
+        self.last_battery_percent = stored.get("last_battery_percent")
+        self.last_trip_distance = stored.get("last_trip_distance")
+        self.last_total_distance = stored.get("last_total_distance")
+
+        if raw_time := stored.get("last_connected_time"):
+            self.last_connected_time = dt_util.parse_datetime(raw_time)
+
+        _LOGGER.info(
+            "Restored last known values for %s: battery=%s%%, voltage=%sV, last connected=%s",
+            self.ble_device.address,
+            self.last_battery_percent,
+            self.last_voltage,
+            self.last_connected_time,
+        )
+
+    @callback
+    def _data_to_save(self) -> dict[str, Any]:
+        """Return the last known values in a JSON serialisable form."""
+        return {
+            "last_connected_time": (
+                self.last_connected_time.isoformat() if self.last_connected_time else None
+            ),
+            "last_voltage": self.last_voltage,
+            "last_battery_percent": self.last_battery_percent,
+            "last_trip_distance": self.last_trip_distance,
+            "last_total_distance": self.last_total_distance,
+        }
+
+    @callback
+    def _schedule_save(self) -> None:
+        """Queue a debounced write of the last known values."""
+        self._store.async_delay_save(self._data_to_save, STORAGE_SAVE_DELAY)
 
     def _setup_uuids_for_brand(self, brand: WheelBrand) -> None:
         """Set up read/write UUIDs and keepalive requirements based on brand."""
@@ -154,6 +207,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_config_entry_first_refresh(self) -> None:
         """Handle the first refresh."""
+        # Restore last known values before any entity is created, so the "last_*"
+        # sensors report their stored value immediately instead of Unknown.
+        await self._async_load_last_known()
+
         # Register a callback to be notified when the device is discovered
         self._cancel_callback = async_register_callback(
             self.hass,
@@ -224,7 +281,8 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             self.last_trip_distance = self.data.get("trip_distance", self.last_trip_distance)
                             self.last_total_distance = self.data.get("total_distance", self.last_total_distance)
                             self.last_connected_time = dt_util.now()
-                        
+                            self._schedule_save()
+
                         try:
                             read_uuid = self._read_uuid or NOTIFY_UUID
                             await self.client.stop_notify(read_uuid)
@@ -373,7 +431,8 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Updated last_connected_time to %s (disconnect time)",
             self.last_connected_time.isoformat() if self.last_connected_time else "None"
         )
-        
+        self._schedule_save()
+
         # Clear the device available event so we wait for it to be rediscovered
         self._device_available.clear()
         self._device_seen_recently = False
@@ -402,13 +461,20 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             telemetry = self.decoder.decode(byte_data)
             if telemetry:
-                # Update last connected time and store last known values
+                # Update last connected time and store last known values.
+                # Only overwrite when the packet actually carried the field, so a
+                # partial packet can't wipe a value we already know.
                 self.last_connected_time = dt_util.now()
-                self.last_voltage = telemetry.get("voltage")
-                self.last_battery_percent = telemetry.get("battery_percent")
-                self.last_trip_distance = telemetry.get("trip_distance")
-                self.last_total_distance = telemetry.get("total_distance")
-                
+                if (voltage := telemetry.get("voltage")) is not None:
+                    self.last_voltage = voltage
+                if (battery := telemetry.get("battery_percent")) is not None:
+                    self.last_battery_percent = battery
+                if (trip := telemetry.get("trip_distance")) is not None:
+                    self.last_trip_distance = trip
+                if (total := telemetry.get("total_distance")) is not None:
+                    self.last_total_distance = total
+                self._schedule_save()
+
                 # Add charge estimates with voltage data
                 estimates = self.charge_tracker.update(
                     telemetry.get("battery_percent", 0),
@@ -459,6 +525,13 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""
+        # Flush the last known values immediately, cancelling any pending delayed
+        # write, so they survive a restart or a reload of the config entry.
+        try:
+            await self._store.async_save(self._data_to_save())
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Failed to save last known values on shutdown")
+
         # Unregister the Bluetooth discovery callback
         if self._cancel_callback:
             self._cancel_callback()

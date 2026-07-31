@@ -102,6 +102,13 @@ CONF_RETRY_COUNT = "retry_count"
 DEFAULT_RETRY_COUNT = 3
 CONF_BRAND = "brand"
 
+# Persistence of "last known" values across Home Assistant restarts.
+# Stored in .storage/euc_charging.<entry_id>
+STORAGE_VERSION = 1
+# Telemetry arrives many times per second, so writes are debounced. Home Assistant
+# flushes any pending delayed save on shutdown, so nothing is lost on a clean restart.
+STORAGE_SAVE_DELAY = 30
+
 
 def sanitize_wheel_id(device_name: str) -> str:
     """Extract and sanitize wheel identifier from Bluetooth device name.
