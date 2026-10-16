@@ -248,6 +248,12 @@ class ChargingInference:
         self.is_charging: Optional[bool] = None
         self.method: Optional[str] = None
 
+    def restart_voltage_history(self) -> None:
+        """Drop voltage evidence (e.g. the voltage scale changed); keep motion/current state."""
+        self._history.clear()
+        self._window_start = None
+        self._peak = self._peak_time = None
+
     def update(
         self, voltage: Optional[float], speed: Optional[float], current: Optional[float] = None
     ) -> tuple[Optional[bool], Optional[str]]:
@@ -878,6 +884,7 @@ class GotwayDecoder(EucDecoder):
         self.total_distance: Optional[float] = None
         # Voltage rule only: Gotway's current is zeroed at standstill (wh/s.java Y0).
         self.charging = ChargingInference(use_current=False, clock=lambda: self._clock())
+        self._inference_scale: Optional[float] = None
         self.reset_session()
 
     @property
@@ -1053,7 +1060,13 @@ class GotwayDecoder(EucDecoder):
             battery_percent = self._battery_percent(voltage, model)
 
         # Real pack voltage when the model is known, else the 67.2 V-scaled raw
-        # value (a smaller but still monotonic rise while charging).
+        # value (a smaller but still monotonic rise while charging). Never mix
+        # the two in one window: a model match/override mid-session changes the
+        # scale, so the voltage history restarts.
+        scale = model.full_voltage if model else None
+        if scale != self._inference_scale:
+            self._inference_scale = scale
+            self.charging.restart_voltage_history()
         is_charging, charging_method = self.charging.update(
             voltage if voltage is not None else raw_voltage, speed
         )

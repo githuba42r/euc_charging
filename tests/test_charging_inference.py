@@ -222,3 +222,23 @@ def test_current_rule_not_gated_by_settle():
     inf.update(80.0, 20.0)
     assert feed(inf, clock, 70, 80.0, current=-3.0) == (True, "inferred_current")
     assert clock.now - 1000 < CHARGE_SETTLE_S
+
+
+def test_gotway_model_change_does_not_mix_voltage_scales():
+    """Probe: parked at raw 60 V, then a 134.4 V model makes it 120 V - not charging."""
+    d = GotwayDecoder()
+    d._clock = clock = Clock()
+    d.reset_session()
+    for _ in range(10):
+        d.decode(gw_live(6000))
+        clock.now += 10
+    d.set_model("Master Pro")
+    r = None
+    for _ in range(10):
+        r = d.decode(gw_live(6000))
+        clock.now += 10
+    assert r["voltage"] == pytest.approx(120.0)
+    assert r["is_charging"] is not True
+    d.set_custom_pack(24)
+    r = d.decode(gw_live(6000))
+    assert r["is_charging"] is not True
