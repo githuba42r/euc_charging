@@ -1,0 +1,30 @@
+"""Tests for BLE device name to wheel brand matching."""
+
+import unittest
+
+from const import WheelBrand, match_brand_by_name
+
+
+class TestMatchBrandByName(unittest.TestCase):
+
+    def test_leaperkim_lk_names(self):
+        for name in ("LK3336", "LK14132", "LK11184"):
+            self.assertEqual(match_brand_by_name(name), WheelBrand.VETERAN, name)
+
+    def test_full_brand_names(self):
+        self.assertEqual(match_brand_by_name("KS-S18"), WheelBrand.KINGSONG)
+        self.assertEqual(match_brand_by_name("Sherman S"), WheelBrand.VETERAN)
+        self.assertEqual(match_brand_by_name("Begode Master"), WheelBrand.GOTWAY)
+
+    def test_longest_pattern_wins(self):
+        self.assertEqual(match_brand_by_name("Ninebot Z10"), WheelBrand.NINEBOT_Z)
+        self.assertEqual(match_brand_by_name("Ninebot One"), WheelBrand.NINEBOT)
+
+    def test_short_patterns_need_prefix_and_boundary(self):
+        self.assertEqual(match_brand_by_name("V8-1234"), WheelBrand.INMOTION)
+        for name in ("JBL Tune 770NC-LE", "Cardo Packtalk", "Phil's S25", "LKQ Parts", None, ""):
+            self.assertIsNone(match_brand_by_name(name), name)
+
+
+if __name__ == "__main__":
+    unittest.main()

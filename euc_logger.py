@@ -38,9 +38,17 @@ except ImportError:
     print("Error: bleak library not found. Install with: pip install bleak")
     sys.exit(1)
 
-# Import our decoders
-sys.path.insert(0, str(Path(__file__).parent / "custom_components" / "euc_charging"))
-from const import (
+# Import our decoders. They use package-relative imports, so load them as the
+# euc_charging package without running its __init__.py (which needs Home Assistant).
+import types
+
+_PKG_DIR = Path(__file__).parent / "custom_components" / "euc_charging"
+if "euc_charging" not in sys.modules:
+    _pkg = types.ModuleType("euc_charging")
+    _pkg.__path__ = [str(_PKG_DIR)]
+    sys.modules["euc_charging"] = _pkg
+
+from euc_charging.const import (
     ALL_SERVICE_UUIDS,
     BRAND_DEVICE_NAMES,
     CELL_CONFIG,
@@ -49,8 +57,9 @@ from const import (
     KINGSONG_READ_UUID,
     VETERAN_SERVICE_UUID,
     VETERAN_READ_UUID,
+    match_brand_by_name,
 )
-from decoders import get_decoder_by_data, get_decoder_by_brand
+from euc_charging.decoders import get_decoder_by_data, get_decoder_by_brand
 
 logging.basicConfig(
     level=logging.INFO,
@@ -267,19 +276,9 @@ async def scan_for_eucs() -> None:
     euc_devices = []
     for device, adv_data in devices.values():
         # Check if device name matches any known EUC patterns
-        is_euc = False
-        detected_brand = None
-        
-        if device.name:
-            for brand, patterns in BRAND_DEVICE_NAMES.items():
-                for pattern in patterns:
-                    if pattern.lower() in device.name.lower():
-                        is_euc = True
-                        detected_brand = brand
-                        break
-                if is_euc:
-                    break
-        
+        detected_brand = match_brand_by_name(device.name)
+        is_euc = detected_brand is not None
+
         # Check service UUIDs
         for service_uuid in adv_data.service_uuids:
             if service_uuid in ALL_SERVICE_UUIDS:

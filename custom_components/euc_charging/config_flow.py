@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import DOMAIN, SERVICE_UUID, DEVICE_NAMES, ALL_SERVICE_UUIDS
+from .const import DOMAIN, SERVICE_UUID, DEVICE_NAMES, ALL_SERVICE_UUIDS, match_brand_by_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             
             # Fallback: Match by device name (for ESPHome proxies that may not forward service UUIDs)
-            if discovery_info.name and any(name in discovery_info.name for name in DEVICE_NAMES):
+            if match_brand_by_name(discovery_info.name):
                 _LOGGER.info("Found EUC device by name match: %s (%s)", discovery_info.name, address)
                 self._discovered_devices[address] = discovery_info
                 matching_by_name += 1

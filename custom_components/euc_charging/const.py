@@ -78,7 +78,7 @@ ALL_SERVICE_UUIDS = [
 BRAND_DEVICE_NAMES = {
     WheelBrand.KINGSONG: ["KS-", "KingSong", "King Song"],
     WheelBrand.GOTWAY: ["GW", "Gotway", "Begode", "MCM", "Monster", "MSX", "Nikola", "RS"],
-    WheelBrand.VETERAN: ["LK3336", "Sherman", "Veteran", "Abrams", "Patton", "Lynx", "Sherman L", "Oryx"],
+    WheelBrand.VETERAN: ["LK", "Sherman", "Veteran", "Abrams", "Patton", "Lynx", "Sherman L", "Oryx"],
     WheelBrand.INMOTION: ["InMotion", "V5", "V8", "V10", "V11", "Glide"],
     WheelBrand.INMOTION_V2: ["InMotion", "V11", "V12", "V13", "V14"],
     WheelBrand.NINEBOT: ["Ninebot", "Nine", "A1", "C", "E+", "P", "S2", "miniPRO"],
@@ -87,6 +87,38 @@ BRAND_DEVICE_NAMES = {
 
 # All device names for discovery
 DEVICE_NAMES = list({name for names in BRAND_DEVICE_NAMES.values() for name in names})
+
+# Patterns this short are model codes ("C", "P", "V8", "LK"); matching them
+# anywhere in a name gives false positives (e.g. "JBL Tune 770NC").
+_SHORT_PATTERN_LEN = 3
+
+
+def _name_matches(name: str, pattern: str) -> bool:
+    """Return True if a BLE device name matches a brand name pattern."""
+    name, pattern = name.lower(), pattern.lower()
+    if len(pattern) > _SHORT_PATTERN_LEN:
+        return pattern in name
+    # Short patterns must start the name and not run into more letters,
+    # so "LK14132" and "V8" match but "Cardo" does not match "C".
+    if not name.startswith(pattern):
+        return False
+    rest = name[len(pattern):]
+    return not rest or not pattern[-1].isalnum() or not rest[0].isalpha()
+
+
+def match_brand_by_name(name: str | None) -> WheelBrand | None:
+    """Return the wheel brand whose name pattern best matches a BLE device name.
+
+    The longest matching pattern wins, so "Ninebot Z10" is Ninebot Z, not Ninebot.
+    """
+    if not name:
+        return None
+    best: tuple[int, WheelBrand] | None = None
+    for brand, patterns in BRAND_DEVICE_NAMES.items():
+        for pattern in patterns:
+            if _name_matches(name, pattern) and (best is None or len(pattern) > best[0]):
+                best = (len(pattern), brand)
+    return best[1] if best else None
 
 # Battery cell configurations (number of cells in series)
 CELL_CONFIG = {
