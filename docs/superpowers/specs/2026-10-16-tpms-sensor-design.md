@@ -33,7 +33,7 @@ Worked example (README): payload `b0 49 01 36` → 2.98 V (98 %), 23 °C,
 
 - **Device model:** each sensor is its own HA device, discovered by HA's
   Bluetooth stack (works through ESPHome proxies). Optionally linked to a
-  configured wheel, shown via `via_device` = that wheel.
+  configured wheel, shown via that wheel (`via_device_id`).
 - **Alarms:** pressure alarm is **minimum only** — on when gauge pressure is
   below a per-sensor minimum (entered in psi, default 30 psi). Low-battery
   alarm uses a fixed threshold: battery below 20 % (2.2 V).
@@ -66,8 +66,9 @@ unavailable and blank the alarm.
 
 ### Config flow (`config_flow.py`)
 
-- `manifest.json` adds a Bluetooth matcher:
-  `{"manufacturer_id": 12288, "local_name": "VD*"}`.
+- `manifest.json` adds a Bluetooth matcher `{"manufacturer_id": 12288, "connectable": false}`.
+  HA requires `local_name` matchers to have ≥ 3 characters, so `VD` cannot
+  be matched there; the config flow checks the name and aborts otherwise.
 - `async_step_bluetooth` branches: if the discovery is a TPMS advert →
   `async_step_tpms_confirm`; otherwise the existing wheel path.
 - `tpms_confirm` form: name (default `TPMS <last 5 of MAC>`), optional wheel
@@ -92,8 +93,7 @@ classes when the entry is a TPMS entry. TPMS entities are
 `CoordinatorEntity`-style listeners that also `RestoreEntity`, always
 available once a value exists.
 
-Device: name from entry title, manufacturer "Motoeye", model "VD TPMS",
-`via_device=(DOMAIN, wheel_address)` when linked.
+Device: name from entry title, manufacturer "Motoeye", model "VD TPMS". When linked, `via_device_id` is the wheel's device-registry id, resolved with `async_get_device_by_identifier((DOMAIN, wheel_address), <wheel config entry id>)` (HA 2026.10 deprecates `via_device` and `async_get_device`); omitted when the wheel device isn't found.
 
 | Entity | Type | Details |
 |---|---|---|
