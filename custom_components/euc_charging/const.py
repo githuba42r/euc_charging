@@ -1,7 +1,7 @@
 """Constants for the EUC Charging integration."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import Any
 
@@ -197,3 +197,31 @@ def is_tpms_entry(data: Mapping[str, Any]) -> bool:
     """Return True if config entry data describes a TPMS sensor."""
     return data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_TPMS
 
+
+
+# Wheel options (Gotway/Begode model picker, InMotion V1 password)
+CONF_GOTWAY_MODEL = "gotway_model"
+CONF_GOTWAY_CELLS = "gotway_cells"
+GOTWAY_MODEL_AUTO = "auto"
+GOTWAY_MODEL_CUSTOM = "custom"
+DEFAULT_GOTWAY_CELLS = 24
+CONF_INMOTION_PASSWORD = "inmotion_password"
+CONF_INMOTION_PASSWORD_MODE = "inmotion_password_mode"
+PASSWORD_MODE_DEFAULT = "default"
+PASSWORD_MODE_CUSTOM = "custom"
+DEFAULT_INMOTION_PASSWORD = "000000"
+INMOTION_PASSWORD_MAX_LEN = 6   # EUC World sends the first 6 characters (wh/v.java e())
+
+# Repairs issue ids (suffixed with the config entry id)
+ISSUE_GOTWAY_MODEL = "gotway_model"
+ISSUE_INMOTION_PASSWORD = "inmotion_password"
+# Connections where the InMotion V1 password was sent but no live data came back
+# before the wrong-password repair issue is raised.
+INMOTION_PASSWORD_SILENT_CONNECTS = 3
+
+
+def is_inmotion_v1_device(name: str | None, service_uuids: Iterable[str] = ()) -> bool:
+    """True if a discovered wheel looks like InMotion V1 (name pattern or FFE5 service)."""
+    if INMOTION_WRITE_SERVICE_UUID in {u.lower() for u in service_uuids}:
+        return True
+    return match_brand_by_name(name) == WheelBrand.INMOTION

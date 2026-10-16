@@ -21,11 +21,26 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
 )
 
 from .const import (
     ALL_SERVICE_UUIDS,
     CONF_ENTRY_TYPE,
+    CONF_GOTWAY_CELLS,
+    CONF_GOTWAY_MODEL,
+    CONF_INMOTION_PASSWORD,
+    CONF_INMOTION_PASSWORD_MODE,
+    DEFAULT_GOTWAY_CELLS,
+    DEFAULT_INMOTION_PASSWORD,
+    GOTWAY_MODEL_AUTO,
+    GOTWAY_MODEL_CUSTOM,
+    INMOTION_PASSWORD_MAX_LEN,
+    PASSWORD_MODE_CUSTOM,
+    PASSWORD_MODE_DEFAULT,
+    WheelBrand,
+    is_inmotion_v1_device,
     CONF_MIN_PRESSURE_PSI,
     CONF_WHEEL_ADDRESS,
     DEFAULT_MIN_PRESSURE_PSI,
@@ -36,6 +51,8 @@ from .const import (
     is_tpms_entry,
     match_brand_by_name,
 )
+from .decoders import GotwayDecoder
+from .gotway_models import GOTWAY_MODELS
 from .tpms import is_tpms_advertisement
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +69,59 @@ def build_tpms_entry(address: str, user_input: dict[str, Any]) -> tuple[dict, di
         data[CONF_WHEEL_ADDRESS] = wheel
     options = {CONF_MIN_PRESSURE_PSI: float(user_input[CONF_MIN_PRESSURE_PSI])}
     return data, options
+
+
+def gotway_model_choices() -> list[SelectOptionDict]:
+    """Auto-detect, Custom, then every model of EUC World's Gotway/Begode table."""
+    return [
+        SelectOptionDict(value=GOTWAY_MODEL_AUTO, label="Auto-detect"),
+        SelectOptionDict(value=GOTWAY_MODEL_CUSTOM, label="Custom (enter pack size)"),
+    ] + [
+        SelectOptionDict(
+            value=model.name,
+            label=f"{model.make or 'Begode'} {model.name} ({model.full_voltage:g} V)",
+        )
+        for model in GOTWAY_MODELS
+    ]
+
+
+GOTWAY_CELL_CHOICES = [
+    SelectOptionDict(value=str(cells), label=f"{cells}S ({cells * 4.2:.1f} V)")
+    for cells in GotwayDecoder.CUSTOM_PACK_CELLS
+]
+
+
+def password_schema_fields(mode: str, password: str) -> dict:
+    """Default/custom InMotion V1 password fields."""
+    return {
+        vol.Required(CONF_INMOTION_PASSWORD_MODE, default=mode): SelectSelector(
+            SelectSelectorConfig(
+                options=[PASSWORD_MODE_DEFAULT, PASSWORD_MODE_CUSTOM],
+                translation_key="inmotion_password_mode",
+                mode=SelectSelectorMode.LIST,
+            )
+        ),
+        vol.Optional(CONF_INMOTION_PASSWORD, default=password): TextSelector(
+            TextSelectorConfig()
+        ),
+    }
+
+
+def resolve_password(user_input: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (password, error key) from the password fields."""
+    if user_input.get(CONF_INMOTION_PASSWORD_MODE, PASSWORD_MODE_DEFAULT) != PASSWORD_MODE_CUSTOM:
+        return DEFAULT_INMOTION_PASSWORD, None
+    password = (user_input.get(CONF_INMOTION_PASSWORD) or "").strip()
+    if not password or len(password) > INMOTION_PASSWORD_MAX_LEN or not password.isascii():
+        return None, "invalid_password"
+    return password, None
+
+
+def password_defaults(data: dict[str, Any]) -> tuple[str, str]:
+    """(mode, password) to pre-fill the form from stored entry data."""
+    password = data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD)
+    mode = PASSWORD_MODE_DEFAULT if password == DEFAULT_INMOTION_PASSWORD else PASSWORD_MODE_CUSTOM
+    return mode, ("" if mode == PASSWORD_MODE_DEFAULT else password)
 
 
 def build_wheel_options(entries: Iterable[ConfigEntry]) -> list[SelectOptionDict]:
@@ -78,6 +148,7 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_device: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._show_all_devices = False
+        self._pending_wheel: tuple[str | None, str] = (None, "")
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -88,10 +159,7 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
             discovery_info = self._discovered_devices[address]
             await self.async_set_unique_id(address, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            return self.async_create_entry(
-                title=discovery_info.name,
-                data={CONF_ADDRESS: discovery_info.address},
-            )
+            return await self._async_create_wheel_entry(discovery_info)
 
         self._discovered_devices = {}
         current_addresses = self._async_current_ids()
@@ -184,6 +252,39 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def _async_create_wheel_entry(
+        self, discovery_info: BluetoothServiceInfoBleak
+    ) -> FlowResult:
+        """Create the wheel entry, asking for the password first on InMotion V1."""
+        self._pending_wheel = (discovery_info.name, discovery_info.address)
+        if is_inmotion_v1_device(discovery_info.name, discovery_info.service_uuids):
+            return await self.async_step_inmotion_password()
+        return self.async_create_entry(
+            title=discovery_info.name, data={CONF_ADDRESS: discovery_info.address}
+        )
+
+    async def async_step_inmotion_password(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """InMotion V1 wheels need a password (EUC World default 000000)."""
+        errors: dict[str, str] = {}
+        name, address = self._pending_wheel
+        if user_input is not None:
+            password, error = resolve_password(user_input)
+            if error:
+                errors[CONF_INMOTION_PASSWORD] = error
+            else:
+                return self.async_create_entry(
+                    title=name,
+                    data={CONF_ADDRESS: address, CONF_INMOTION_PASSWORD: password},
+                )
+        return self.async_show_form(
+            step_id="inmotion_password",
+            data_schema=vol.Schema(password_schema_fields(PASSWORD_MODE_DEFAULT, "")),
+            errors=errors,
+            description_placeholders={"name": name or address},
+        )
+
     async def async_step_no_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -267,10 +368,7 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._discovered_device is not None
         
         if user_input is not None:
-            return self.async_create_entry(
-                title=self._discovered_device.name,
-                data={CONF_ADDRESS: self._discovered_device.address},
-            )
+            return await self._async_create_wheel_entry(self._discovered_device)
 
         self._set_confirm_only()
         return self.async_show_form(
@@ -312,14 +410,16 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
     @classmethod
     @callback
     def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
-        """Only TPMS entries have options."""
-        return is_tpms_entry(config_entry.data)
+        """TPMS entries and wheel entries have options."""
+        return True
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """Return the TPMS options flow."""
-        return TpmsOptionsFlow()
+        """Return the TPMS or wheel options flow."""
+        if is_tpms_entry(config_entry.data):
+            return TpmsOptionsFlow()
+        return WheelOptionsFlow()
 
 
 class TpmsOptionsFlow(OptionsFlow):
@@ -339,4 +439,90 @@ class TpmsOptionsFlow(OptionsFlow):
             data_schema=vol.Schema({
                 vol.Required(CONF_MIN_PRESSURE_PSI, default=current): MIN_PRESSURE_SCHEMA,
             }),
+        )
+
+
+def wheel_option_fields(entry: ConfigEntry, brand: WheelBrand | None) -> tuple[bool, bool]:
+    """Which settings apply: (Gotway model, InMotion V1 password).
+
+    The brand is only known once the coordinator has detected the protocol
+    (or picked it from the name), so an undetected wheel gets both - a silent
+    InMotion V1 with the wrong password is exactly such a wheel.
+    """
+    if brand is None:
+        return True, True
+    return (
+        brand in (WheelBrand.GOTWAY, WheelBrand.BEGODE),
+        brand == WheelBrand.INMOTION or CONF_INMOTION_PASSWORD in entry.data,
+    )
+
+
+def gotway_option_fields(options: dict[str, Any]) -> dict:
+    return {
+        vol.Required(
+            CONF_GOTWAY_MODEL, default=options.get(CONF_GOTWAY_MODEL, GOTWAY_MODEL_AUTO)
+        ): SelectSelector(
+            SelectSelectorConfig(options=gotway_model_choices(), mode=SelectSelectorMode.DROPDOWN)
+        ),
+        vol.Required(
+            CONF_GOTWAY_CELLS, default=str(options.get(CONF_GOTWAY_CELLS, DEFAULT_GOTWAY_CELLS))
+        ): SelectSelector(
+            SelectSelectorConfig(options=GOTWAY_CELL_CHOICES, mode=SelectSelectorMode.DROPDOWN)
+        ),
+    }
+
+
+def gotway_options_from_input(user_input: dict[str, Any]) -> dict[str, Any]:
+    return {
+        CONF_GOTWAY_MODEL: user_input[CONF_GOTWAY_MODEL],
+        CONF_GOTWAY_CELLS: int(user_input[CONF_GOTWAY_CELLS]),
+    }
+
+
+class WheelOptionsFlow(OptionsFlow):
+    """Wheel settings: Gotway/Begode model, InMotion V1 password.
+
+    Applied by the entry's update listener without a reload.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Own step id so its strings don't clash with the TPMS options "init"."""
+        return await self.async_step_wheel()
+
+    async def async_step_wheel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        entry = self.config_entry
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        decoder = getattr(coordinator, "decoder", None)
+        brand = decoder.brand if decoder is not None else None
+        show_gotway, show_password = wheel_option_fields(entry, brand)
+        if not show_gotway and not show_password:
+            return self.async_abort(reason="no_wheel_options")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            options = dict(entry.options)
+            if show_gotway:
+                options.update(gotway_options_from_input(user_input))
+            if show_password:
+                password, error = resolve_password(user_input)
+                if error:
+                    errors[CONF_INMOTION_PASSWORD] = error
+                elif password != entry.data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD):
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, CONF_INMOTION_PASSWORD: password}
+                    )
+            if not errors:
+                return self.async_create_entry(data=options)
+
+        fields: dict = {}
+        if show_gotway:
+            fields.update(gotway_option_fields(dict(entry.options)))
+        if show_password:
+            fields.update(password_schema_fields(*password_defaults(dict(entry.data))))
+        return self.async_show_form(
+            step_id="wheel", data_schema=vol.Schema(fields), errors=errors
         )

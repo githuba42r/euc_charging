@@ -7,9 +7,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, STORAGE_VERSION, is_tpms_entry
+from .const import (
+    DOMAIN,
+    ISSUE_GOTWAY_MODEL,
+    ISSUE_INMOTION_PASSWORD,
+    STORAGE_VERSION,
+    is_tpms_entry,
+)
 from .coordinator import EucChargingCoordinator
 from .tpms_coordinator import TpmsCoordinator
 
@@ -38,10 +45,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    # Wheel settings (Gotway model, InMotion V1 password) apply without a reload.
+    entry.async_on_unload(entry.add_update_listener(_async_wheel_options_updated))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def _async_wheel_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply changed wheel options/data to the running coordinator."""
+    hass.data[DOMAIN][entry.entry_id].async_apply_options()
 
 
 async def _async_setup_tpms_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -75,5 +89,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up the stored last known values when the entry is removed."""
+    """Clean up the stored last known values and repair issues of the entry."""
     await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
+    for kind in (ISSUE_GOTWAY_MODEL, ISSUE_INMOTION_PASSWORD):
+        ir.async_delete_issue(hass, DOMAIN, f"{kind}_{entry.entry_id}")

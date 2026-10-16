@@ -35,11 +35,24 @@
                     "wheel_address": "Wheel",
                     "min_pressure_psi": "Minimum pressure (psi)"
                 }
+            },
+            "inmotion_password": {
+                "title": "InMotion wheel password",
+                "description": "**{name}** looks like an InMotion V1 wheel, which only sends data after it receives its password. Keep the default (000000) unless you changed the password on the wheel.",
+                "data": {
+                    "inmotion_password_mode": "Wheel password",
+                    "inmotion_password": "Custom password"
+                },
+                "data_description": {
+                    "inmotion_password_mode": "InMotion V1 wheels (V5/V8/V10, Glide 3) only answer after the right password. Most use the factory default 000000.",
+                    "inmotion_password": "Up to 6 characters, as EUC World sends them; shorter passwords are padded with 0. Only used when Custom is selected."
+                }
             }
         },
         "error": {
             "no_devices_found": "No devices found.",
-            "invalid_mac": "Invalid MAC address format. Use format: XX:XX:XX:XX:XX:XX"
+            "invalid_mac": "Invalid MAC address format. Use format: XX:XX:XX:XX:XX:XX",
+            "invalid_password": "Enter 1 to 6 ASCII characters."
         },
         "abort": {
             "already_configured": "Device is already configured",
@@ -54,7 +67,29 @@
                 "data": {
                     "min_pressure_psi": "Minimum pressure (psi)"
                 }
+            },
+            "wheel": {
+                "title": "Wheel settings",
+                "description": "Settings that apply to some wheel brands only. The Gotway/Begode model sets the real pack voltage and battery curve (Gotway wheels report voltage as if they were 67.2 V packs). The password is only used by InMotion V1 wheels.",
+                "data": {
+                    "gotway_model": "Gotway/Begode wheel model",
+                    "gotway_cells": "Custom pack size (cells in series)",
+                    "inmotion_password_mode": "Wheel password",
+                    "inmotion_password": "Custom password"
+                },
+                "data_description": {
+                    "gotway_model": "Auto-detect uses the name and firmware the wheel reports. Choose your model if it isn't recognised.",
+                    "gotway_cells": "Only used when the model is Custom.",
+                    "inmotion_password_mode": "InMotion V1 wheels (V5/V8/V10, Glide 3) only answer after the right password. Most use the factory default 000000.",
+                    "inmotion_password": "Up to 6 characters, as EUC World sends them; shorter passwords are padded with 0. Only used when Custom is selected."
+                }
             }
+        },
+        "error": {
+            "invalid_password": "Enter 1 to 6 ASCII characters."
+        },
+        "abort": {
+            "no_wheel_options": "This wheel has no settings to change."
         }
     },
     "entity": {
@@ -84,6 +119,58 @@
                 "name": "Battery Current"
             }
         }
+    },
+    "selector": {
+        "inmotion_password_mode": {
+            "options": {
+                "default": "Default (000000)",
+                "custom": "Custom password"
+            }
+        }
+    },
+    "issues": {
+        "gotway_model": {
+            "title": "Select your Gotway/Begode wheel model",
+            "fix_flow": {
+                "step": {
+                    "select_model": {
+                        "title": "Select your Gotway/Begode wheel model",
+                        "description": "**{name}** didn't identify itself as a known model, so its real voltage and battery percentage can't be worked out (Gotway/Begode wheels report voltage as if they were 67.2 V packs). Pick the model, or Custom with the pack size. You can change this later under the integration's Configure options.",
+                        "data": {
+                            "gotway_model": "Wheel model",
+                            "gotway_cells": "Custom pack size (cells in series)"
+                        }
+                    }
+                },
+                "abort": {
+                    "entry_removed": "The wheel has been removed."
+                }
+            }
+        },
+        "inmotion_password": {
+            "title": "InMotion wheel isn't responding — check the wheel password",
+            "fix_flow": {
+                "step": {
+                    "password": {
+                        "title": "InMotion wheel password",
+                        "description": "**{name}** connected several times but sent no data after the password was sent. InMotion V1 wheels stay silent with a wrong password. Enter the wheel's password (factory default 000000).",
+                        "data": {
+                            "inmotion_password_mode": "Wheel password",
+                            "inmotion_password": "Custom password"
+                        },
+                        "data_description": {
+                            "inmotion_password_mode": "InMotion V1 wheels (V5/V8/V10, Glide 3) only answer after the right password. Most use the factory default 000000.",
+                            "inmotion_password": "Up to 6 characters, as EUC World sends them; shorter passwords are padded with 0. Only used when Custom is selected."
+                        }
+                    }
+                },
+                "error": {
+                    "invalid_password": "Enter 1 to 6 ASCII characters."
+                },
+                "abort": {
+                    "entry_removed": "The wheel has been removed."
+                }
+            }
+        }
     }
 }
-

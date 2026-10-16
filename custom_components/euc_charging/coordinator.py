@@ -23,6 +23,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -37,8 +38,24 @@ from .const import (
     NINEBOT_Z_READ_UUID, NINEBOT_Z_WRITE_UUID,
     WheelBrand,
     match_brand_by_name,
+    CONF_GOTWAY_CELLS,
+    CONF_GOTWAY_MODEL,
+    CONF_INMOTION_PASSWORD,
+    DEFAULT_GOTWAY_CELLS,
+    DEFAULT_INMOTION_PASSWORD,
+    GOTWAY_MODEL_AUTO,
+    GOTWAY_MODEL_CUSTOM,
+    INMOTION_PASSWORD_SILENT_CONNECTS,
+    ISSUE_GOTWAY_MODEL,
+    ISSUE_INMOTION_PASSWORD,
 )
-from .decoders import EucDecoder, get_decoder_by_brand, get_decoder_by_data
+from .decoders import (
+    EucDecoder,
+    GotwayDecoder,
+    InMotionDecoder,
+    get_decoder_by_brand,
+    get_decoder_by_data,
+)
 from .charge_tracker import ChargeTracker
 
 if TYPE_CHECKING:
@@ -91,6 +108,12 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._preselected = False
         self._preselect_disabled = False
         self._connects_without_data = 0
+        # InMotion V1: connections where the password went out but no live data came back
+        self._silent_password_connects = 0
+        self._password_issue_open = False
+        # Whether the Gotway "select model" issue is raised; None = not yet
+        # synced this run (so a stale issue from a previous run gets cleared).
+        self._gotway_issue_open: bool | None = None
         self.auto_connect_enabled = True  # Default to enabled
         self._reconnect_event = asyncio.Event()
         
@@ -407,6 +430,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Ninebot/InMotion wheels only answer requests, so their protocol can't be
                 # detected from incoming data: pick it from the BLE name up front.
                 self._check_preselected_decoder()
+                self._check_inmotion_password()
                 if not self.decoder:
                     self._preselect_decoder_by_name()
 
@@ -511,6 +535,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if brand is None:
             return
         self.decoder = get_decoder_by_brand(brand)
+        self._configure_decoder()
         self._preselected = True
         self._connects_without_data = 0
         _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
@@ -530,6 +555,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.decoder.packet_count > 0:
             self._preselected = False   # confirmed; treat like a detected decoder
             return
+        if isinstance(self.decoder, InMotionDecoder):
+            # A silent InMotion V1 is most likely a wrong password (raised as a
+            # repair issue), not a wrong protocol: its FFE5 service was checked.
+            return
         self._connects_without_data += 1
         if self._connects_without_data > self.PRESELECT_MAX_EMPTY_CONNECTS:
             _LOGGER.warning(
@@ -537,6 +566,93 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.decoder.name, self.PRESELECT_MAX_EMPTY_CONNECTS,
             )
             self._drop_preselected_decoder()
+
+    # --- wheel options and repair issues ---------------------------------------
+
+    def _issue_id(self, kind: str) -> str:
+        return f"{kind}_{self.entry.entry_id}"
+
+    @callback
+    def _configure_decoder(self) -> None:
+        """Apply the entry's wheel settings to the current decoder."""
+        decoder = self.decoder
+        options = getattr(self.entry, "options", {}) or {}
+        data = getattr(self.entry, "data", {}) or {}
+        if isinstance(decoder, GotwayDecoder):
+            choice = options.get(CONF_GOTWAY_MODEL, GOTWAY_MODEL_AUTO)
+            if choice == GOTWAY_MODEL_CUSTOM:
+                decoder.set_custom_pack(int(options.get(CONF_GOTWAY_CELLS, DEFAULT_GOTWAY_CELLS)))
+            elif choice != GOTWAY_MODEL_AUTO and decoder.set_model(choice):
+                pass
+            else:
+                decoder.clear_model_override()
+        elif isinstance(decoder, InMotionDecoder):
+            decoder.password = data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD)
+
+    @callback
+    def async_apply_options(self) -> None:
+        """Entry options/data changed: apply without reloading."""
+        decoder = self.decoder
+        password_before = getattr(decoder, "password", None)
+        self._configure_decoder()
+        if isinstance(decoder, InMotionDecoder) and decoder.password != password_before:
+            # Retry with the new password straight away and give it fresh chances.
+            self._silent_password_connects = 0
+            self._preselect_disabled = False
+            decoder.reset_session()
+        self._update_issues()
+
+    @callback
+    def _update_issues(self) -> None:
+        """Raise/clear the Gotway model and InMotion password repair issues."""
+        if self.hass is None or getattr(self.entry, "entry_id", None) is None:
+            return
+        decoder = self.decoder
+        if isinstance(decoder, GotwayDecoder):
+            unmatched = decoder.model_unmatched
+            if unmatched == self._gotway_issue_open:
+                pass   # no change; avoid touching the registry on every packet
+            elif unmatched:
+                self._gotway_issue_open = True
+                ir.async_create_issue(
+                    self.hass, DOMAIN, self._issue_id(ISSUE_GOTWAY_MODEL),
+                    is_fixable=True,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key=ISSUE_GOTWAY_MODEL,
+                    translation_placeholders={"name": self.entry.title or ""},
+                    data={"entry_id": self.entry.entry_id},
+                )
+            else:
+                self._gotway_issue_open = False
+                ir.async_delete_issue(self.hass, DOMAIN, self._issue_id(ISSUE_GOTWAY_MODEL))
+        if (
+            isinstance(decoder, InMotionDecoder)
+            and decoder.values_received
+            and (self._password_issue_open or self._silent_password_connects)
+        ):
+            self._silent_password_connects = 0
+            self._password_issue_open = False
+            ir.async_delete_issue(self.hass, DOMAIN, self._issue_id(ISSUE_INMOTION_PASSWORD))
+
+    @callback
+    def _check_inmotion_password(self) -> None:
+        """At connect: count the previous InMotion V1 session if it stayed silent."""
+        decoder = self.decoder
+        if not isinstance(decoder, InMotionDecoder):
+            return
+        if not decoder.password_sent or decoder.values_received:
+            return
+        self._silent_password_connects += 1
+        if self._silent_password_connects >= INMOTION_PASSWORD_SILENT_CONNECTS:
+            self._password_issue_open = True
+            ir.async_create_issue(
+                self.hass, DOMAIN, self._issue_id(ISSUE_INMOTION_PASSWORD),
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_INMOTION_PASSWORD,
+                translation_placeholders={"name": self.entry.title or ""},
+                data={"entry_id": self.entry.entry_id},
+            )
 
     def _detection_matches_name(self, decoder: EucDecoder) -> bool:
         """Reject a data-based detection that contradicts a passive brand's BLE name.
@@ -639,11 +755,14 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.info("Protocol detected: %s (brand: %s)", self.decoder.name, self.decoder.brand)
                     # Setup UUIDs for this brand
                     self._setup_uuids_for_brand(self.decoder.brand)
+                    self._configure_decoder()
                 else:
                     # Buffer is too short or unknown header
                     return
 
             telemetry = self.decoder.decode(byte_data)
+            if telemetry:
+                self._update_issues()
 
             # Protocols detected from data only start writing (Gotway/KingSong
             # model probe) once a packet has actually decoded, so a
