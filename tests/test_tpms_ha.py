@@ -13,7 +13,13 @@ from homeassistant.util import dt as dt_util  # noqa: E402
 
 from euc_charging import tpms_coordinator  # noqa: E402
 from euc_charging.tpms_coordinator import TpmsCoordinator  # noqa: E402
-from euc_charging.config_flow import NO_WHEEL, build_tpms_entry  # noqa: E402
+from euc_charging import config_flow  # noqa: E402
+from euc_charging.config_flow import (  # noqa: E402
+    NO_WHEEL,
+    EucChargingConfigFlow,
+    build_tpms_entry,
+    build_wheel_options,
+)
 
 ADDRESS = "B9:42:FB:00:02:A6"
 
@@ -136,3 +142,48 @@ def test_build_tpms_entry_without_wheel():
     )
     assert data == {"address": ADDRESS, "entry_type": "tpms"}
     assert options == {"min_pressure_psi": 30.0}
+
+
+def test_build_wheel_options_skips_tpms_and_ignored_entries():
+    entries = [
+        SimpleNamespace(title="Front TPMS", data={"address": ADDRESS, "entry_type": "tpms"}),
+        SimpleNamespace(title="LK3336", data={"address": "88:25:83:F3:5D:30"}),
+        SimpleNamespace(title="Ignored", data={}),  # ignored discovery: empty data
+    ]
+
+    options = build_wheel_options(entries)
+
+    assert options == [
+        {"value": NO_WHEEL, "label": "None"},
+        {"value": "88:25:83:F3:5D:30", "label": "LK3336"},
+    ]
+
+
+def test_build_wheel_options_only_none_without_wheels():
+    assert build_wheel_options([]) == [{"value": NO_WHEEL, "label": "None"}]
+
+
+def _service_info(name, address, manufacturer_data=None, service_uuids=None):
+    return SimpleNamespace(
+        name=name, address=address, rssi=-60,
+        manufacturer_data=manufacturer_data or {}, service_uuids=service_uuids or [],
+    )
+
+
+def test_user_step_excludes_tpms_sensors_even_when_showing_all(monkeypatch):
+    infos = [
+        _service_info("VD-02A6", ADDRESS, {0x3000: bytes.fromhex("b0490136")}),
+        _service_info("LK3336", "88:25:83:F3:5D:30"),
+    ]
+    monkeypatch.setattr(config_flow, "async_discovered_service_info", lambda hass: infos)
+    flow = EucChargingConfigFlow()
+    flow.hass = object()
+    monkeypatch.setattr(flow, "_async_current_ids", lambda: set())
+    shown = {}
+    monkeypatch.setattr(flow, "async_show_form", lambda **kw: shown.update(kw) or kw)
+    flow._show_all_devices = True
+
+    asyncio.run(flow.async_step_user())
+
+    assert list(flow._discovered_devices) == ["88:25:83:F3:5D:30"]
+    assert shown["step_id"] == "user"

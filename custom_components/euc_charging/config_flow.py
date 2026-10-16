@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import voluptuous as vol
@@ -51,6 +52,20 @@ def build_tpms_entry(address: str, user_input: dict[str, Any]) -> tuple[dict, di
         data[CONF_WHEEL_ADDRESS] = wheel
     options = {CONF_MIN_PRESSURE_PSI: float(user_input[CONF_MIN_PRESSURE_PSI])}
     return data, options
+
+
+def build_wheel_options(entries: Iterable[ConfigEntry]) -> list[SelectOptionDict]:
+    """Return the wheel dropdown options for the TPMS confirm form.
+
+    "None" comes first, followed by every wheel (non-TPMS) entry that has an
+    address. Entries without an address (e.g. ignored discoveries, whose data
+    is empty) are skipped.
+    """
+    return [SelectOptionDict(value=NO_WHEEL, label="None")] + [
+        SelectOptionDict(value=entry.data[CONF_ADDRESS], label=entry.title)
+        for entry in entries
+        if not is_tpms_entry(entry.data) and CONF_ADDRESS in entry.data
+    ]
 
 
 class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -104,6 +119,11 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             
             if address in self._discovered_devices:
+                continue
+
+            # TPMS sensors are set up via Bluetooth discovery, never as wheels
+            if is_tpms_advertisement(discovery_info.name, discovery_info.manufacturer_data):
+                _LOGGER.debug("Skipping %s - TPMS sensor", address)
                 continue
 
             # If showing all devices, include everything
@@ -273,11 +293,9 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
                 title=user_input[CONF_NAME], data=data, options=options
             )
 
-        wheel_options = [SelectOptionDict(value=NO_WHEEL, label="None")] + [
-            SelectOptionDict(value=entry.data[CONF_ADDRESS], label=entry.title)
-            for entry in self._async_current_entries()
-            if not is_tpms_entry(entry.data)
-        ]
+        wheel_options = build_wheel_options(
+            self._async_current_entries(include_ignore=False)
+        )
         schema = vol.Schema({
             vol.Required(CONF_NAME, default=f"TPMS {address[-5:]}"): str,
             vol.Required(CONF_WHEEL_ADDRESS, default=NO_WHEEL): SelectSelector(
