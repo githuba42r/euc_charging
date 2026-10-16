@@ -100,6 +100,24 @@ class EucChargingBinarySensor(CoordinatorEntity[EucChargingCoordinator], BinaryS
         return True
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """How the charging state was obtained; inferred states are experimental."""
+        if self.entity_description.key != "is_charging" or not self.coordinator.data:
+            return None
+        data = self.coordinator.data
+        method = data.get("charging_method")
+        if method is None and isinstance(data.get("is_charging"), bool):
+            method = "flag"   # decoders with a wheel-reported flag (e.g. Veteran)
+        if method is None:
+            return None
+        attrs: dict[str, Any] = {"charging_method": method}
+        if method.startswith("inferred"):
+            attrs["experimental"] = True
+        if data.get("charging_status_raw") is not None:
+            attrs["charging_status_raw"] = data["charging_status_raw"]
+        return attrs
+
+    @property
     def is_on(self) -> bool | None:
         """Return true if the binary sensor is on."""
         if not self.coordinator.data:

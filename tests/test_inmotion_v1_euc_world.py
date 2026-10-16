@@ -149,7 +149,7 @@ def test_sequence_and_values():
     # 80 V on EUC World's V1 curve (74.5 V 50 %, 82.5 V 100 %): 84.375 -> 84.
     assert r["battery_percent"] == 84
     assert r["system_voltage"] == pytest.approx(84.0)
-    assert r["is_charging"] is None
+    assert r["is_charging"] is False   # 3.6 km/h: moving -> inferred not charging
 
 
 def test_escaped_bytes_in_reply():

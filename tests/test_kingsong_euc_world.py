@@ -55,7 +55,9 @@ def test_live_fields_little_endian():
     assert r["total_distance"] == pytest.approx(123.456)     # hi word @6, lo word @8
     assert r["current"] == pytest.approx(-12.34)
     assert r["temperature"] == pytest.approx(34.56)          # direct x 0.01 C
-    assert r["is_charging"] is None and r["charging_current"] is None
+    # Moving at 25.5 km/h: the experimental inference says not charging.
+    assert r["is_charging"] is False and r["charging_method"] == "inferred_voltage"
+    assert r["charging_current"] is None
 
 
 def test_total_distance_word_order():

@@ -197,6 +197,112 @@ def euc_world_curve_percent(
     return float(percents[-1])
 
 
+# --- Experimental charging inference ---------------------------------------------
+# KingSong, Gotway/Begode and InMotion V1 send no charging flag that EUC World
+# uses, so charging is inferred from what they do send. These are heuristics of
+# this integration, not EUC World behaviour, hence "experimental".
+
+CHARGE_STATIONARY_KMH = 1.0       # below this the wheel counts as standing still
+CHARGE_MOVING_KMH = 2.0           # at/above this the wheel is moving: not charging
+CHARGE_VOLTAGE_RISE_V = 0.3       # pack voltage rise that means charging ...
+CHARGE_VOLTAGE_WINDOW_S = 300.0   # ... within this window (5 min)
+CHARGE_VOLTAGE_STALL_S = 600.0    # charging ends after no new voltage high for 10 min
+CHARGE_CURRENT_A = -0.5           # current below this while stationary ...
+CHARGE_CURRENT_SUSTAIN_S = 60.0   # ... for this long means charging
+
+METHOD_FLAG = "flag"
+METHOD_INFERRED_CURRENT = "inferred_current"
+METHOD_INFERRED_VOLTAGE = "inferred_voltage"
+
+
+class ChargingInference:
+    """Infer charging from stationary voltage rise and, optionally, negative current.
+
+    * Voltage rule: standing still and the pack voltage is >= 0.3 V above its
+      lowest value in the last 5 minutes -> charging; it stays charging until
+      no new voltage high has been seen for 10 minutes.
+    * Current rule (``use_current``): standing still with current < -0.5 A for
+      60 s -> charging (negative current while moving is regen, ignored).
+    * Either rule active -> charging. Moving (>= 2 km/h) -> not charging. With
+      a full 5-minute stationary window and neither rule active -> not charging.
+      Until then the state is unknown (None).
+    """
+
+    def __init__(self, use_current: bool, clock=time.monotonic) -> None:
+        self.use_current = use_current
+        self._clock = clock
+        self.reset()
+
+    def reset(self) -> None:
+        self._history: list[tuple[float, float]] = []   # (time, voltage) while stationary
+        self._window_start: Optional[float] = None        # first stationary sample time
+        self._peak: Optional[float] = None
+        self._peak_time: Optional[float] = None
+        self._negative_since: Optional[float] = None
+        self._moved = False
+        self.is_charging: Optional[bool] = None
+        self.method: Optional[str] = None
+
+    def update(
+        self, voltage: Optional[float], speed: Optional[float], current: Optional[float] = None
+    ) -> tuple[Optional[bool], Optional[str]]:
+        """Feed one live sample; return (is_charging, charging_method)."""
+        if voltage is None or speed is None:
+            return self.is_charging, self.method
+        now = self._clock()
+        moving = abs(speed) >= CHARGE_MOVING_KMH
+        stationary = abs(speed) < CHARGE_STATIONARY_KMH
+
+        if moving:
+            self._history.clear()
+            self._window_start = None
+            self._peak = self._peak_time = None
+            self._negative_since = None
+            self._moved = True
+            return self._set(False, METHOD_INFERRED_VOLTAGE)
+        if not stationary:
+            return self.is_charging, self.method   # 1-2 km/h: hold (hysteresis)
+
+        # Voltage rule
+        if self._window_start is None:
+            self._window_start = now
+        self._history.append((now, voltage))
+        self._history = [(t, v) for t, v in self._history if now - t <= CHARGE_VOLTAGE_WINDOW_S]
+        lowest = min(v for _, v in self._history)
+        if voltage - lowest >= CHARGE_VOLTAGE_RISE_V:
+            if self._peak is None or voltage > self._peak:
+                self._peak, self._peak_time = voltage, now
+        elif self._peak is not None and voltage > self._peak:
+            self._peak, self._peak_time = voltage, now
+        voltage_active = (
+            self._peak_time is not None and now - self._peak_time < CHARGE_VOLTAGE_STALL_S
+        )
+        if self._peak_time is not None and not voltage_active:
+            self._peak = self._peak_time = None
+
+        # Current rule
+        current_active = False
+        if self.use_current and current is not None:
+            if current < CHARGE_CURRENT_A:
+                if self._negative_since is None:
+                    self._negative_since = now
+                current_active = now - self._negative_since >= CHARGE_CURRENT_SUSTAIN_S
+            else:
+                self._negative_since = None
+
+        if current_active:
+            return self._set(True, METHOD_INFERRED_CURRENT)
+        if voltage_active:
+            return self._set(True, METHOD_INFERRED_VOLTAGE)
+        if self.is_charging or self._moved or now - self._window_start >= CHARGE_VOLTAGE_WINDOW_S:
+            return self._set(False, METHOD_INFERRED_VOLTAGE)
+        return self.is_charging, self.method
+
+    def _set(self, charging: bool, method: str) -> tuple[bool, str]:
+        self.is_charging, self.method = charging, method
+        return charging, method
+
+
 class UnpackerState(Enum):
     """State of the protocol unpacker."""
     UNKNOWN = 0
@@ -578,6 +684,8 @@ class KingSongDecoder(EucDecoder):
         self.version: Optional[str] = None
         self.serial: Optional[str] = None
         self.trip_distance: Optional[float] = None
+        self.charging_status_raw: Optional[int] = None
+        self.charging = ChargingInference(use_current=True, clock=lambda: self._clock())
         self.reset_session()
 
     @property
@@ -587,6 +695,7 @@ class KingSongDecoder(EucDecoder):
     def reset_session(self) -> None:
         """Re-request the wheel name after every connect."""
         self._name_answered = False
+        self.charging.reset()
         self._next_name_request = self._clock() + self.NAME_FIRST_DELAY
 
     @classmethod
@@ -630,6 +739,9 @@ class KingSongDecoder(EucDecoder):
         if command == self.CMD_DISTANCE:
             hi, lo = struct.unpack_from("<HH", buff, 2)
             self.trip_distance = (hi * 65536 + lo) * 0.001
+            # "chargingStatus" (wh/z.java, 0xB9 byte 13): parsed by EUC World but
+            # not shown; exposed raw for diagnostics only.
+            self.charging_status_raw = buff[13]
             return None
         if command != self.CMD_LIVE:
             return None
@@ -646,6 +758,7 @@ class KingSongDecoder(EucDecoder):
             battery_percent = self._battery_percent(voltage)
             system_voltage = round(self._series_cells() * 4.2, 2)
 
+        is_charging, charging_method = self.charging.update(voltage, speed, current)
         self.packet_count += 1
         return {
             "voltage": round(voltage, 2),
@@ -657,7 +770,9 @@ class KingSongDecoder(EucDecoder):
             "current": round(current, 2),
             "temperature": round(temperature, 2),
             "battery_percent": battery_percent,
-            "is_charging": None,
+            "is_charging": is_charging,
+            "charging_method": charging_method,
+            "charging_status_raw": self.charging_status_raw,
             "charging_current": None,
             "charging_power": None,
             "battery_current": None,
@@ -751,6 +866,8 @@ class GotwayDecoder(EucDecoder):
         self._model_forced = False
         self.trip_distance: Optional[float] = None
         self.total_distance: Optional[float] = None
+        # Voltage rule only: Gotway's current is zeroed at standstill (wh/s.java Y0).
+        self.charging = ChargingInference(use_current=False, clock=lambda: self._clock())
         self.reset_session()
 
     @property
@@ -795,6 +912,7 @@ class GotwayDecoder(EucDecoder):
     def reset_session(self) -> None:
         """Restart the name/firmware probe (EUC World does this on every connect)."""
         self._probe = "name"
+        self.charging.reset()
         self._attempts_left = self.PROBE_ATTEMPTS
         self._next_send = self._clock() + self.PROBE_FIRST_DELAY
         self._deadline: Optional[float] = None
@@ -900,6 +1018,11 @@ class GotwayDecoder(EucDecoder):
             voltage = raw_voltage * self.VOLTAGE_RATIOS.get(int(model.full_voltage), 1.0)
             battery_percent = self._battery_percent(voltage, model)
 
+        # Real pack voltage when the model is known, else the 67.2 V-scaled raw
+        # value (a smaller but still monotonic rise while charging).
+        is_charging, charging_method = self.charging.update(
+            voltage if voltage is not None else raw_voltage, speed
+        )
         self.packet_count += 1
         model_name = model.name if model else "Gotway"
         manufacturer = (model.make if model and model.make else "Begode")
@@ -914,7 +1037,8 @@ class GotwayDecoder(EucDecoder):
             "current": round(current, 2),
             "temperature": round(temperature, 2),
             "battery_percent": battery_percent,
-            "is_charging": None,
+            "is_charging": is_charging,
+            "charging_method": charging_method,
             "charging_current": None,
             "charging_power": None,
             "battery_current": None,
@@ -1002,6 +1126,7 @@ class InMotionDecoder(EucDecoder):
     def __init__(self) -> None:
         super().__init__()
         self._clock = time.monotonic
+        self.charging = ChargingInference(use_current=True, clock=lambda: self._clock())
         self.reset_session()
 
     @property
@@ -1021,6 +1146,7 @@ class InMotionDecoder(EucDecoder):
         self.version: Optional[str] = None
         self.serial: Optional[str] = None
         self._values: dict[str, Any] = {}
+        self.charging.reset()
 
     write_chunk_delay = 0.02     # Thread.sleep(20) between full pieces
 
@@ -1171,6 +1297,9 @@ class InMotionDecoder(EucDecoder):
 
     def _telemetry(self) -> dict[str, Any]:
         v = self._values
+        is_charging, charging_method = self.charging.update(
+            v["voltage"], v["speed"], v["current"]
+        )
         return {
             "voltage": round(v["voltage"], 2),
             "speed": round(v["speed"], 2),
@@ -1179,7 +1308,8 @@ class InMotionDecoder(EucDecoder):
             "current": round(v["current"], 2),
             "temperature": v["temperature"],
             "battery_percent": euc_world_curve_percent(v["voltage"], *self.BATTERY_CURVE),
-            "is_charging": None,
+            "is_charging": is_charging,
+            "charging_method": charging_method,
             "charging_current": None,
             "charging_power": None,
             "battery_current": None,
@@ -1500,6 +1630,7 @@ class InMotionV2Decoder(EucDecoder):
             "temperature": v.get("temperature"),
             "battery_percent": round(battery, 2) if battery is not None else None,
             "is_charging": is_charging,
+            "charging_method": METHOD_FLAG if is_charging is not None else None,
             "battery_current": round(v["current"], 2) if "current" in v else None,
             "charging_current": charging_current,
             "charging_power": charging_power,
@@ -1782,6 +1913,7 @@ class _NinebotBase(EucDecoder):
             "temperature": round(v["temperature"], 1) if "temperature" in v else None,
             "battery_percent": v.get("battery_percent"),
             "is_charging": is_charging,
+            "charging_method": METHOD_FLAG if is_charging is not None else None,
             "battery_current": battery_current,
             "charging_current": charging_current,
             "charging_power": charging_power,

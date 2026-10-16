@@ -24,3 +24,16 @@ def test_charging_binary_sensor_unknown(data, expected):
     assert _charging_entity(data).is_on is expected
 
 
+
+
+@pytest.mark.parametrize("data, expected", [
+    ({"is_charging": True, "charging_method": "inferred_current"},
+     {"charging_method": "inferred_current", "experimental": True}),
+    ({"is_charging": False, "charging_method": "inferred_voltage", "charging_status_raw": 0},
+     {"charging_method": "inferred_voltage", "experimental": True, "charging_status_raw": 0}),
+    ({"is_charging": True}, {"charging_method": "flag"}),       # Veteran: no key, real flag
+    ({"is_charging": None}, None),
+    (None, None),
+])
+def test_charging_method_attribute(data, expected):
+    assert _charging_entity(data).extra_state_attributes == expected
