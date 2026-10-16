@@ -338,6 +338,10 @@ class VeteranDecoder(EucDecoder):
         self.unpacker = VeteranUnpacker()
         self.model_version = 0
         self.detected_model = "Sherman S"  # Default
+        # Battery currents from extended sub-pages 0/4, cached because the
+        # sub-page id rotates from frame to frame
+        self._subpage_current: Optional[float] = None
+        self._pack_currents: Optional[tuple[float, float]] = None
 
     @property
     def brand(self) -> WheelBrand:
@@ -396,6 +400,16 @@ class VeteranDecoder(EucDecoder):
             
             battery_percent = self.calculate_battery_percent(voltage, system_voltage)
             is_charging = charge_mode > 0
+            battery_current = self._decode_battery_current(buff, is_charging)
+            if is_charging:
+                charging_current = (
+                    round(-battery_current, 2) if battery_current is not None else None
+                )
+            else:
+                charging_current = 0.0
+            charging_power = (
+                round(charging_current * voltage, 1) if charging_current is not None else None
+            )
 
             self.packet_count += 1
             
@@ -413,6 +427,8 @@ class VeteranDecoder(EucDecoder):
             self.last_telemetry.manufacturer = "Leaperkim" if model.startswith("Sherman") else "Veteran"
             self.last_telemetry.system_voltage = system_voltage
             self.last_telemetry.pitch_angle = pitch_angle
+            if battery_current is not None:
+                self.last_telemetry.battery_current = battery_current
 
             return {
                 "voltage": voltage,
@@ -430,12 +446,45 @@ class VeteranDecoder(EucDecoder):
                 "system_voltage": system_voltage,
                 "auto_off_sec": auto_off_sec,
                 "pitch_angle": pitch_angle,
+                "battery_current": battery_current,
+                "charging_current": charging_current,
+                "charging_power": charging_power,
             }
 
         except (struct.error, IndexError) as e:
             _LOGGER.debug(f"Veteran decode error: {e}")
             self.error_count += 1
             return None
+
+    def _decode_battery_current(self, buff: bytes, is_charging: bool) -> Optional[float]:
+        """Return battery current in amps (negative while charging), per EUC World.
+
+        Frames with payload length >= 47 carry an extended sub-page selected by
+        byte 46. Sub-pages 0 and 4 hold the battery current at offset 63 (x0.1 A)
+        and, on frames with length >= 73, per-pack currents at 69/71 (x0.01 A).
+        """
+        length = buff[3]
+        if length < 47:
+            return None
+
+        if buff[46] in (0, 4) and length >= 69:
+            raw = struct.unpack(">h", buff[63:65])[0]
+            self._subpage_current = raw * 0.1 if is_charging and raw <= 0 else None
+            if length >= 73:
+                self._pack_currents = (
+                    struct.unpack(">h", buff[69:71])[0] * 0.01,
+                    struct.unpack(">h", buff[71:73])[0] * 0.01,
+                )
+
+        if not is_charging:
+            self._subpage_current = None
+            self._pack_currents = None
+            return round(struct.unpack(">h", buff[38:40])[0] * 0.15, 2)
+        if self._pack_currents is not None:
+            return round(sum(self._pack_currents), 2)
+        if self._subpage_current is not None:
+            return round(self._subpage_current, 2)
+        return None
 
     def _int_from_bytes_rev_be(self, data: bytes, offset: int) -> int:
         """Read a 32-bit integer in 'reversed big-endian' format."""

@@ -14,7 +14,9 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    UnitOfElectricCurrent,
     UnitOfElectricPotential,
+    UnitOfPower,
     UnitOfSpeed,
     UnitOfLength,
     UnitOfTemperature,
@@ -74,6 +76,35 @@ SENSORS: tuple[EucChargingSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: data.get("temperature"),
+    ),
+    EucChargingSensorDescription(
+        key="charging_current",
+        name="Charging Current",
+        device_class=SensorDeviceClass.CURRENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:current-dc",
+        value_fn=lambda data: data.get("charging_current"),
+    ),
+    EucChargingSensorDescription(
+        key="charging_power",
+        name="Charging Power",
+        device_class=SensorDeviceClass.POWER,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda data: data.get("charging_power"),
+    ),
+    EucChargingSensorDescription(
+        key="battery_current",
+        name="Battery Current",
+        device_class=SensorDeviceClass.CURRENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: data.get("battery_current"),
     ),
     # Charge time estimate sensors
     EucChargingSensorDescription(

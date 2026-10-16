@@ -54,6 +54,15 @@
             },
             "charge_rate": {
                 "name": "Charge Rate"
+            },
+            "charging_current": {
+                "name": "Charging Current"
+            },
+            "charging_power": {
+                "name": "Charging Power"
+            },
+            "battery_current": {
+                "name": "Battery Current"
             }
         }
     }
