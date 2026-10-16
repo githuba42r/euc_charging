@@ -24,17 +24,22 @@ print(f"Gotway header: {gotway_packet[:4].hex()}")
 assert gotway_packet[0] == 0x55 and gotway_packet[1] == 0xAA
 print("✓ Gotway protocol detection works (55 AA)")
 
-# Test 4: InMotion V1 protocol detection (AA AA with small len)
+# Test 4: InMotion V1 header (AA AA ... 55 55)
 inmotion_packet = bytes([0xAA, 0xAA, 0x09, 0x01])
 print(f"InMotion V1 header: {inmotion_packet[:4].hex()}")
 assert inmotion_packet[0] == 0xAA and inmotion_packet[1] == 0xAA
-print("✓ InMotion V1 protocol detection works (AA AA len=09)")
+print("✓ InMotion V1 header check works (AA AA)")
 
-# Test 5: InMotion V2 protocol detection (DC 5A with flags != 5C)
-inmotionv2_packet = bytes([0xDC, 0x5A, 0x05, 0x01])
-print(f"InMotion V2 header: {inmotionv2_packet[:4].hex()}")
-assert inmotionv2_packet[0] == 0xDC and inmotionv2_packet[1] == 0x5A and inmotionv2_packet[2] != 0x5C
-print("✓ InMotion V2 protocol detection works (DC 5A flags=05)")
+# Test 5: InMotion V2 header (AA AA cmd len data xor; the old "DC 5A" header
+# was made up). V1 and V2 share AA AA; V2 frames end in an XOR checksum.
+inmotionv2_packet = bytes([0xAA, 0xAA, 0x14, 0x01, 0x04])
+inmotionv2_packet += bytes([0xAA ^ 0xAA ^ 0x14 ^ 0x01 ^ 0x04])
+print(f"InMotion V2 frame: {inmotionv2_packet.hex()}")
+checksum = 0
+for b in inmotionv2_packet[:-1]:
+    checksum ^= b
+assert inmotionv2_packet[:2] == bytes([0xAA, 0xAA]) and checksum == inmotionv2_packet[-1]
+print("✓ InMotion V2 frame check works (AA AA + XOR)")
 
 # Test 6: Ninebot One header (55 AA [len] [addr]; told apart from Gotway by checksum)
 ninebot_packet = bytes([0x55, 0xAA, 0x03, 0x11])

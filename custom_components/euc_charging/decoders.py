@@ -101,6 +101,22 @@ class EucDecoder(ABC):
         return [packet] if packet else []
 
     @property
+    def has_pending_requests(self) -> bool:
+        """True while the protocol still has (or may soon have) something to send.
+
+        The coordinator polls slowly once this is False (e.g. Gotway/KingSong
+        after their one-off model probe).
+        """
+        return self.get_keepalive_packet() is not None
+
+    # Pause between the pieces split_write() returns.
+    write_chunk_delay: float = 0.0
+
+    def split_write(self, packet: bytes) -> list[bytes]:
+        """Split a request into the GATT writes EUC World makes (default: one)."""
+        return [packet]
+
+    @property
     def name(self) -> str:
         """Return the name of the decoder."""
         return self.__class__.__name__
@@ -583,6 +599,10 @@ class KingSongDecoder(EucDecoder):
         packet[18] = packet[19] = 0x5A
         return bytes(packet)
 
+    @property
+    def has_pending_requests(self) -> bool:
+        return not self._name_answered
+
     def get_requests(self) -> list[bytes]:
         if self._name_answered:
             return []
@@ -716,7 +736,7 @@ class GotwayDecoder(EucDecoder):
     PROBE_TIMEOUT = 1.5        # gi/j, gi/l: retry timer A1 posted for 1500 ms
     PROBE_STEP_DELAY = 0.1     # B()/C(): next request posted after 100 ms
     PROBE_ATTEMPTS = 2         # B()/C(): counter set to 2, decremented per timeout
-    NAME_RE = re.compile(rb"NAME:(.*)")
+    NAME_RE = re.compile(rb"NAME:([^\r\n]*)")
     FIRMWARE_RE = re.compile(rb"^(GW|JL|JN|CF)\d{7}")
 
     request_interval = 0.05
@@ -778,6 +798,10 @@ class GotwayDecoder(EucDecoder):
         self._attempts_left = self.PROBE_ATTEMPTS
         self._next_send = self._clock() + self.PROBE_FIRST_DELAY
         self._deadline: Optional[float] = None
+
+    @property
+    def has_pending_requests(self) -> bool:
+        return self._probe != "done"
 
     def get_requests(self) -> list[bytes]:
         """Send "N", then "V", each retried once after 1.5 s without an answer."""
@@ -973,6 +997,7 @@ class InMotionDecoder(EucDecoder):
     SYSTEM_VOLTAGE = 84.0         # gauge max 85 V = 20 x 4.25 (zh/a.java b())
 
     request_interval = 0.02
+    has_pending_requests = True   # request/response for the whole session
 
     def __init__(self) -> None:
         super().__init__()
@@ -996,6 +1021,29 @@ class InMotionDecoder(EucDecoder):
         self.version: Optional[str] = None
         self.serial: Optional[str] = None
         self._values: dict[str, Any] = {}
+
+    write_chunk_delay = 0.02     # Thread.sleep(20) between full pieces
+
+    def split_write(self, packet: bytes) -> list[bytes]:
+        """FFE9 writes as EUC World makes them (ui/a.java, fallback decompilation).
+
+        Full 20-byte pieces, then the remainder copied into the start of the
+        same reused 20-byte buffer, which is written whole - so the last write
+        is always 20 bytes, its tail repeating the previous piece. Replicated
+        byte-for-byte because that is what is known to work with real wheels.
+        """
+        if len(packet) <= 20:
+            return [packet]
+        pieces, buf = [], bytearray(20)
+        full = len(packet) // 20
+        for i in range(full):
+            buf[:] = packet[i * 20:(i + 1) * 20]
+            pieces.append(bytes(buf))
+        rest = packet[full * 20:]
+        if rest:
+            buf[:len(rest)] = rest
+            pieces.append(bytes(buf))
+        return pieces
 
     @classmethod
     def build_request(cls, name: str, data: Optional[bytes]) -> bytes:
@@ -1215,6 +1263,7 @@ class InMotionV2Decoder(EucDecoder):
     }
 
     request_interval = 0.02
+    has_pending_requests = True   # request/response for the whole session
 
     def __init__(self) -> None:
         super().__init__()
@@ -1505,6 +1554,7 @@ class _NinebotBase(EucDecoder):
     RESPONSE_TIMEOUT = 0.25          # 250 ms per request (field z)
 
     request_interval = 0.02
+    has_pending_requests = True   # request/response for the whole session
 
     def __init__(self) -> None:
         super().__init__()
