@@ -160,6 +160,27 @@ class EucDecoder(ABC):
         return 0.0
 
 
+def euc_world_curve_percent(
+    voltage: float, volts: tuple[float, ...], percents: tuple[float, ...]
+) -> float:
+    """Piecewise-linear voltage -> percent as EUC World does (zh/a.java f()).
+
+    Clamped to the first/last point and rounded half up to a whole percent
+    (fc/e.java h()), which is how EUC World reports battery level.
+    """
+    if voltage < volts[0]:
+        return float(percents[0])
+    if voltage > volts[-1]:
+        return float(percents[-1])
+    for i in range(len(volts) - 1):
+        if voltage <= volts[i + 1]:
+            pct = percents[i] + (voltage - volts[i]) * (
+                percents[i + 1] - percents[i]
+            ) / (volts[i + 1] - volts[i])
+            return float(math.floor(pct + 0.5))
+    return float(percents[-1])
+
+
 class UnpackerState(Enum):
     """State of the protocol unpacker."""
     UNKNOWN = 0
@@ -880,24 +901,28 @@ class GotwayDecoder(EucDecoder):
             "system_voltage": system_voltage,
         }
 
-    @staticmethod
-    def _battery_percent(voltage: float, model: GotwayModel) -> float:
-        """EUC World's default ("discharge map") battery level for Gotway.
+    # EUC World's default (battery_level = 0) Gotway curves, keyed by
+    # int(full voltage): (volts, percent) points (zh/a.java tables B..J,
+    # selected in e() - confirmed in the fallback decompilation).
+    BATTERY_CURVES: dict[int, tuple[tuple[float, ...], tuple[float, ...]]] = {
+        42: ((33.25, 40.9375), (0, 100)),
+        67: ((53.2, 65.5), (0, 100)),
+        84: ((66.5, 81.875), (0, 100)),
+        100: ((79.8, 98.25), (0, 100)),
+        134: ((106.4, 131.0), (0, 100)),
+        151: ((119.7, 147.4), (0, 100)),
+        168: ((133.0, 163.75), (0, 100)),
+        210: ((166.25, 204.6875), (0, 100)),
+        252: ((199.5, 245.625), (0, 100)),
+    }
 
-        Linear from the model's empty voltage (default full * 0.7857142857) at
-        0 % to full - 0.5 V at 100 %, clamped (zh/a.java, battery_level = 0).
-        """
-        full = model.full_voltage - 0.5
-        empty = (
-            model.empty_voltage
-            if model.empty_voltage is not None
-            else model.full_voltage * 0.7857142857142856
-        )
-        if voltage <= empty:
-            return 0.0
-        if voltage >= full:
-            return 100.0
-        return round((voltage - empty) / (full - empty) * 100.0, 1)
+    @classmethod
+    def _battery_percent(cls, voltage: float, model: GotwayModel) -> Optional[float]:
+        """EUC World's default battery level for the model's pack voltage."""
+        curve = cls.BATTERY_CURVES.get(int(model.full_voltage))
+        if curve is None:
+            return None   # e.g. a 126 V pack: EUC World has no curve either
+        return euc_world_curve_percent(voltage, *curve)
 
 
 # Placeholder decoders for InMotion and Ninebot

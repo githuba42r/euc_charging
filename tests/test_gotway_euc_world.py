@@ -11,6 +11,7 @@ import struct
 import pytest
 
 from euc_charging.decoders import GotwayDecoder, GotwayUnpacker, get_decoder_by_data
+from euc_charging.gotway_models import GotwayModel
 
 
 def frame(frame_type: int, data: bytes = b"", sub: int = 0) -> bytes:
@@ -126,8 +127,9 @@ def test_name_probe_selects_model_and_scales_voltage():
     assert result["system_voltage"] == pytest.approx(134.4)
     assert result["model"] == "Master Pro"
     assert result["version"] == "GW2304001"
-    # Discharge map: empty 99.2 V -> 0 %, 134.4 - 0.5 = 133.9 V -> 100 %.
-    assert result["battery_percent"] == pytest.approx(round((120 - 99.2) / (133.9 - 99.2) * 100, 1))
+    # EUC World default curve for int(134.4) = 134: 106.4 V -> 0 %, 131 V -> 100 %,
+    # rounded half up: 55.28 -> 55.
+    assert result["battery_percent"] == 55
 
 
 def test_firmware_match_when_name_unknown():
@@ -150,9 +152,17 @@ def test_16s_model_is_not_scaled():
     assert decoder.set_model("MCM 4")
     result = decoder.decode(live(voltage_raw=6000))
     assert result["voltage"] == pytest.approx(60.0)
-    # No empty voltage in the table -> EUC World default full * 0.7857.
-    empty = 67.2 * 0.7857142857142856
-    assert result["battery_percent"] == pytest.approx(round((60 - empty) / (66.7 - empty) * 100, 1))
+    # 67 V curve: 53.2 V -> 0 %, 65.5 V -> 100 %: 55.28 -> 55.
+    assert result["battery_percent"] == 55
+
+
+def test_pack_without_euc_world_curve_has_no_battery_percent():
+    decoder, _ = make_decoder()
+    decoder.model = GotwayModel("Test 126 V", None, 126.0, None, 1.0, 1.0, (), ())
+    decoder._model_forced = True
+    result = decoder.decode(live(voltage_raw=6000))
+    assert result["voltage"] == pytest.approx(60.0)   # int(126) has no ratio either
+    assert result["battery_percent"] is None
 
 
 def test_probe_gives_up_after_two_timeouts_per_request():
