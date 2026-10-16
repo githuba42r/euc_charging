@@ -19,6 +19,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    CONF_ADDRESS,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     STATE_ON,
@@ -39,6 +40,7 @@ from .const import (
     CONF_WHEEL_ADDRESS,
     DEFAULT_MIN_PRESSURE_PSI,
     DOMAIN,
+    is_tpms_entry,
 )
 from .tpms import is_low_battery, is_low_pressure
 from .tpms_coordinator import TpmsCoordinator
@@ -113,12 +115,27 @@ def _resolve_via_device_id(hass: HomeAssistant, entry: ConfigEntry) -> str | Non
     """Resolve the wheel device's registry id for via_device_id, if any.
 
     Resolved once per entry (not per entity) by the setup helpers and passed
-    into each entity's constructor.
+    into each entity's constructor. ``async_get_device`` is deprecated, so the
+    wheel's own config entry is found first (the non-TPMS entry whose address
+    matches), and its id is used to resolve the device unambiguously via
+    ``async_get_device_by_identifier``.
     """
     wheel_address = entry.data.get(CONF_WHEEL_ADDRESS)
     if not wheel_address:
         return None
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, wheel_address)})
+    wheel_entry = next(
+        (
+            e
+            for e in hass.config_entries.async_entries(DOMAIN)
+            if not is_tpms_entry(e.data) and e.data.get(CONF_ADDRESS) == wheel_address
+        ),
+        None,
+    )
+    if wheel_entry is None:
+        return None
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, wheel_address), wheel_entry.entry_id
+    )
     return device.id if device else None
 
 
