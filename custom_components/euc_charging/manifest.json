@@ -12,6 +12,10 @@
     {
       "service_uuid": "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
       "connectable": true
+    },
+    {
+      "manufacturer_id": 12288,
+      "connectable": false
     }
   ],
   "documentation": "https://github.com/githuba42r/euc_charging",

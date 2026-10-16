@@ -26,6 +26,15 @@
             "bluetooth_confirm": {
                 "title": "Confirm Device",
                 "description": "Do you want to add the device **{name}**?"
+            },
+            "tpms_confirm": {
+                "title": "Add TPMS Sensor",
+                "description": "Found a Motoeye TPMS sensor ({address}). Name it, optionally link it to a wheel, and set the minimum tyre pressure for the Low Pressure alarm.",
+                "data": {
+                    "name": "Name",
+                    "wheel_address": "Wheel",
+                    "min_pressure_psi": "Minimum pressure (psi)"
+                }
             }
         },
         "error": {
@@ -36,6 +45,16 @@
             "already_configured": "Device is already configured",
             "no_devices_found": "No devices found",
             "not_supported": "This device is not supported"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "TPMS Sensor Options",
+                "data": {
+                    "min_pressure_psi": "Minimum pressure (psi)"
+                }
+            }
         }
     },
     "entity": {

@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("homeassistant")
 
 from euc_charging.tpms_coordinator import TpmsCoordinator  # noqa: E402
+from euc_charging.config_flow import NO_WHEEL, build_tpms_entry  # noqa: E402
 
 ADDRESS = "B9:42:FB:00:02:A6"
 
@@ -43,3 +44,19 @@ def test_coordinator_ignores_bad_payload():
 
     assert coordinator.reading is None
     assert calls == []
+
+
+def test_build_tpms_entry_with_wheel():
+    data, options = build_tpms_entry(
+        ADDRESS, {"name": "Front", "wheel_address": "88:25:83:F3:5D:30", "min_pressure_psi": 32}
+    )
+    assert data == {"address": ADDRESS, "entry_type": "tpms", "wheel_address": "88:25:83:F3:5D:30"}
+    assert options == {"min_pressure_psi": 32.0}
+
+
+def test_build_tpms_entry_without_wheel():
+    data, options = build_tpms_entry(
+        ADDRESS, {"name": "Front", "wheel_address": NO_WHEEL, "min_pressure_psi": 30}
+    )
+    assert data == {"address": ADDRESS, "entry_type": "tpms"}
+    assert options == {"min_pressure_psi": 30.0}

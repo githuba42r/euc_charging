@@ -11,13 +11,46 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.const import CONF_ADDRESS, CONF_NAME
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
-from .const import DOMAIN, SERVICE_UUID, DEVICE_NAMES, ALL_SERVICE_UUIDS, match_brand_by_name
+from .const import (
+    ALL_SERVICE_UUIDS,
+    CONF_ENTRY_TYPE,
+    CONF_MIN_PRESSURE_PSI,
+    CONF_WHEEL_ADDRESS,
+    DEFAULT_MIN_PRESSURE_PSI,
+    DEVICE_NAMES,
+    DOMAIN,
+    ENTRY_TYPE_TPMS,
+    SERVICE_UUID,
+    is_tpms_entry,
+    match_brand_by_name,
+)
+from .tpms import is_tpms_advertisement
 
 _LOGGER = logging.getLogger(__name__)
+
+NO_WHEEL = "none"
+MIN_PRESSURE_SCHEMA = vol.All(vol.Coerce(float), vol.Range(min=1, max=150))
+
+
+def build_tpms_entry(address: str, user_input: dict[str, Any]) -> tuple[dict, dict]:
+    """Return (data, options) for a TPMS config entry from the confirm form."""
+    data: dict[str, Any] = {CONF_ADDRESS: address, CONF_ENTRY_TYPE: ENTRY_TYPE_TPMS}
+    wheel = user_input.get(CONF_WHEEL_ADDRESS)
+    if wheel and wheel != NO_WHEEL:
+        data[CONF_WHEEL_ADDRESS] = wheel
+    options = {CONF_MIN_PRESSURE_PSI: float(user_input[CONF_MIN_PRESSURE_PSI])}
+    return data, options
 
 
 class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -196,6 +229,10 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(discovery_info.address)
         self._abort_if_unique_id_configured()
 
+        if is_tpms_advertisement(discovery_info.name, discovery_info.manufacturer_data):
+            self._discovered_device = discovery_info
+            return await self.async_step_tpms_confirm()
+
         # Check if any of our supported service UUIDs are present
         if any(uuid in discovery_info.service_uuids for uuid in ALL_SERVICE_UUIDS):
             self._discovered_device = discovery_info
@@ -221,4 +258,67 @@ class EucChargingConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "name": self._discovered_device.name
             },
+        )
+
+    async def async_step_tpms_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm a discovered TPMS sensor: name, wheel link, minimum pressure."""
+        assert self._discovered_device is not None
+        address = self._discovered_device.address
+
+        if user_input is not None:
+            data, options = build_tpms_entry(address, user_input)
+            return self.async_create_entry(
+                title=user_input[CONF_NAME], data=data, options=options
+            )
+
+        wheel_options = [SelectOptionDict(value=NO_WHEEL, label="None")] + [
+            SelectOptionDict(value=entry.data[CONF_ADDRESS], label=entry.title)
+            for entry in self._async_current_entries()
+            if not is_tpms_entry(entry.data)
+        ]
+        schema = vol.Schema({
+            vol.Required(CONF_NAME, default=f"TPMS {address[-5:]}"): str,
+            vol.Required(CONF_WHEEL_ADDRESS, default=NO_WHEEL): SelectSelector(
+                SelectSelectorConfig(options=wheel_options, mode=SelectSelectorMode.DROPDOWN)
+            ),
+            vol.Required(CONF_MIN_PRESSURE_PSI, default=DEFAULT_MIN_PRESSURE_PSI): MIN_PRESSURE_SCHEMA,
+        })
+        return self.async_show_form(
+            step_id="tpms_confirm",
+            data_schema=schema,
+            description_placeholders={"address": address},
+        )
+
+    @classmethod
+    @callback
+    def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
+        """Only TPMS entries have options."""
+        return is_tpms_entry(config_entry.data)
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the TPMS options flow."""
+        return TpmsOptionsFlow()
+
+
+class TpmsOptionsFlow(OptionsFlow):
+    """Edit a TPMS sensor's minimum pressure."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(
+                data={CONF_MIN_PRESSURE_PSI: float(user_input[CONF_MIN_PRESSURE_PSI])}
+            )
+
+        current = self.config_entry.options.get(CONF_MIN_PRESSURE_PSI, DEFAULT_MIN_PRESSURE_PSI)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(CONF_MIN_PRESSURE_PSI, default=current): MIN_PRESSURE_SCHEMA,
+            }),
         )
