@@ -57,8 +57,8 @@ def short_reply(req_id: int) -> bytes:
 def values_payload(voltage=8000, current=-150, temp=31, trip=12345, total=1234567, a=3812, b=3812):
     p = bytearray(64)
     struct.pack_into("<ii", p, 12, a, b)
-    struct.pack_into("<i", p, 20, voltage)
-    struct.pack_into("<i", p, 24, current)
+    struct.pack_into("<i", p, 20, current)    # v.L -> "vca" current (sh/m.java e())
+    struct.pack_into("<I", p, 24, voltage)    # v.V -> "vvo" voltage
     struct.pack_into("b", p, 32, temp)
     struct.pack_into("<I", p, 44, trip)
     struct.pack_into("<I", p, 48, total)
@@ -191,3 +191,17 @@ def test_init_retried_and_later_timeouts_skipped():
 
 def test_detection():
     assert isinstance(get_decoder_by_data(short_reply(PASSWORD_ID)), InMotionDecoder)
+
+
+def test_voltage_at_24_current_at_20():
+    """sh/m.java e(): v.V (i32@24, unsigned-widened) -> "vvo" voltage; v.L (i32@20) -> "vca" current."""
+    d, clock = make()
+    run_session(d, clock)
+    clock.now += 0.06
+    d.get_requests()
+    p = bytearray(values_payload())
+    p[20:24] = (-2534).to_bytes(4, "little", signed=True)
+    p[24:28] = (8412).to_bytes(4, "little")
+    r = feed(d, reply(READ_VALUES_ID, bytes(p)))
+    assert r["voltage"] == pytest.approx(84.12)
+    assert r["current"] == pytest.approx(-25.34)

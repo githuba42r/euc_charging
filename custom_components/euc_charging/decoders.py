@@ -1160,10 +1160,11 @@ class InMotionDecoder(EucDecoder):
         v = self._values
         a, b = struct.unpack_from("<ii", p, 12)
         v["speed"] = abs(a + b) * 3.6 / 7624.0
-        v["voltage"] = struct.unpack_from("<i", p, 20)[0] * 0.01
-        # EUC World widens this int32 as unsigned (k1.e); read signed so a
-        # negative current is not reported as ~42.9 million A.
-        v["current"] = struct.unpack_from("<i", p, 24)[0] * 0.01
+        # sh/m.java e() feeds v.V (offset 24, widened unsigned by k1.e) into the
+        # voltage metric "vvo" and v.L (offset 20, signed) into current "vca";
+        # zh/a.java's V1 battery curve and sag model also take v.V as voltage.
+        v["voltage"] = struct.unpack_from("<I", p, 24)[0] * 0.01
+        v["current"] = struct.unpack_from("<i", p, 20)[0] * 0.01
         v["temperature"] = float(struct.unpack_from("b", p, 32)[0])
         v["trip_distance"] = struct.unpack_from("<I", p, 44)[0] * 0.001
         v["total_distance"] = struct.unpack_from("<I", p, 48)[0] * 0.001
