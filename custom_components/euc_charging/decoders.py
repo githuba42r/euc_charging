@@ -204,9 +204,11 @@ def euc_world_curve_percent(
 
 CHARGE_STATIONARY_KMH = 1.0       # below this the wheel counts as standing still
 CHARGE_MOVING_KMH = 2.0           # at/above this the wheel is moving: not charging
+CHARGE_SETTLE_S = 900.0           # ignore voltage for 15 min after riding (pack rebound)
 CHARGE_VOLTAGE_RISE_V = 0.3       # pack voltage rise that means charging ...
-CHARGE_VOLTAGE_WINDOW_S = 300.0   # ... within this window (5 min)
-CHARGE_VOLTAGE_STALL_S = 600.0    # charging ends after no new voltage high for 10 min
+CHARGE_VOLTAGE_WINDOW_S = 600.0   # ... within this window (10 min)
+CHARGE_NEW_HIGH_V = 0.05          # a new high must beat the peak by this much ...
+CHARGE_VOLTAGE_STALL_S = 600.0    # ... and charging ends after none for 10 min
 CHARGE_CURRENT_A = -0.5           # current below this while stationary ...
 CHARGE_CURRENT_SUSTAIN_S = 60.0   # ... for this long means charging
 
@@ -218,14 +220,17 @@ METHOD_INFERRED_VOLTAGE = "inferred_voltage"
 class ChargingInference:
     """Infer charging from stationary voltage rise and, optionally, negative current.
 
-    * Voltage rule: standing still and the pack voltage is >= 0.3 V above its
-      lowest value in the last 5 minutes -> charging; it stays charging until
-      no new voltage high has been seen for 10 minutes.
+    * Voltage rule: standing still, at least 15 minutes after the last riding
+      (so the pack's post-ride voltage rebound isn't mistaken for charging),
+      and the pack voltage is >= 0.3 V above its lowest value in the last
+      10 minutes -> charging. It stays charging until no new high (>= 0.05 V
+      above the peak) has been seen for 10 minutes.
     * Current rule (``use_current``): standing still with current < -0.5 A for
-      60 s -> charging (negative current while moving is regen, ignored).
+      60 s -> charging (negative current while moving is regen, ignored). Not
+      gated by the settle time.
     * Either rule active -> charging. Moving (>= 2 km/h) -> not charging. With
-      a full 5-minute stationary window and neither rule active -> not charging.
-      Until then the state is unknown (None).
+      a full 10-minute stationary window and neither rule active -> not
+      charging. Until then the state is unknown (None).
     """
 
     def __init__(self, use_current: bool, clock=time.monotonic) -> None:
@@ -235,11 +240,11 @@ class ChargingInference:
 
     def reset(self) -> None:
         self._history: list[tuple[float, float]] = []   # (time, voltage) while stationary
-        self._window_start: Optional[float] = None        # first stationary sample time
+        self._window_start: Optional[float] = None        # first accepted stationary sample
         self._peak: Optional[float] = None
         self._peak_time: Optional[float] = None
         self._negative_since: Optional[float] = None
-        self._moved = False
+        self._last_moving: Optional[float] = None
         self.is_charging: Optional[bool] = None
         self.method: Optional[str] = None
 
@@ -250,35 +255,35 @@ class ChargingInference:
         if voltage is None or speed is None:
             return self.is_charging, self.method
         now = self._clock()
-        moving = abs(speed) >= CHARGE_MOVING_KMH
-        stationary = abs(speed) < CHARGE_STATIONARY_KMH
-
-        if moving:
+        if abs(speed) >= CHARGE_MOVING_KMH:
             self._history.clear()
             self._window_start = None
             self._peak = self._peak_time = None
             self._negative_since = None
-            self._moved = True
+            self._last_moving = now
             return self._set(False, METHOD_INFERRED_VOLTAGE)
-        if not stationary:
+        if abs(speed) >= CHARGE_STATIONARY_KMH:
             return self.is_charging, self.method   # 1-2 km/h: hold (hysteresis)
 
-        # Voltage rule
-        if self._window_start is None:
-            self._window_start = now
-        self._history.append((now, voltage))
-        self._history = [(t, v) for t, v in self._history if now - t <= CHARGE_VOLTAGE_WINDOW_S]
-        lowest = min(v for _, v in self._history)
-        if voltage - lowest >= CHARGE_VOLTAGE_RISE_V:
-            if self._peak is None or voltage > self._peak:
+        # Voltage rule (skipped while the pack settles after a ride)
+        voltage_active = False
+        settling = self._last_moving is not None and now - self._last_moving < CHARGE_SETTLE_S
+        if not settling:
+            if self._window_start is None:
+                self._window_start = now
+            self._history.append((now, voltage))
+            self._history = [
+                (t, v) for t, v in self._history if now - t <= CHARGE_VOLTAGE_WINDOW_S
+            ]
+            lowest = min(v for _, v in self._history)
+            if self._peak is None:
+                if voltage - lowest >= CHARGE_VOLTAGE_RISE_V:
+                    self._peak, self._peak_time = voltage, now
+            elif voltage >= self._peak + CHARGE_NEW_HIGH_V:
                 self._peak, self._peak_time = voltage, now
-        elif self._peak is not None and voltage > self._peak:
-            self._peak, self._peak_time = voltage, now
-        voltage_active = (
-            self._peak_time is not None and now - self._peak_time < CHARGE_VOLTAGE_STALL_S
-        )
-        if self._peak_time is not None and not voltage_active:
-            self._peak = self._peak_time = None
+            if self._peak_time is not None and now - self._peak_time >= CHARGE_VOLTAGE_STALL_S:
+                self._peak = self._peak_time = None
+            voltage_active = self._peak_time is not None
 
         # Current rule
         current_active = False
@@ -294,7 +299,12 @@ class ChargingInference:
             return self._set(True, METHOD_INFERRED_CURRENT)
         if voltage_active:
             return self._set(True, METHOD_INFERRED_VOLTAGE)
-        if self.is_charging or self._moved or now - self._window_start >= CHARGE_VOLTAGE_WINDOW_S:
+        if (
+            self.is_charging
+            or self._last_moving is not None
+            or (self._window_start is not None
+                and now - self._window_start >= CHARGE_VOLTAGE_WINDOW_S)
+        ):
             return self._set(False, METHOD_INFERRED_VOLTAGE)
         return self.is_charging, self.method
 
