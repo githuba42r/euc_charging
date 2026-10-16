@@ -1286,490 +1286,487 @@ class InMotionV2Decoder(EucDecoder):
 
 
 
-class NinebotEncryption:
-    """Encryption helper for Ninebot protocol.
-    
-    Ninebot uses XOR encryption with a gamma key sequence.
-    The key is generated based on the serial number and session.
-    """
+# --- Ninebot One (S2/A1/C/E/P) and Ninebot One Z, per EUC World 2.68.0 ---------
+#
+# Both protocols are strict request/response: the wheel only answers register
+# reads, so the decoder drives a state machine (get_requests) and decodes the
+# replies. Sources: yh/a.java (55 AA, One S2/A1 family), yh/b.java (5A A5, One Z),
+# wh/b0.java (serial-prefix model table), sh/m.java (which register is which
+# metric). Field names in comments are EUC World metric keys.
 
-    def __init__(self) -> None:
-        self.gamma_key = bytearray()
-
-    def init_key(self, serial: str = "N2GUS12345678") -> None:
-        """Initialize the gamma key from serial number.
-        
-        Args:
-            serial: Device serial number (default is generic)
-        """
-        # Generate gamma key from serial
-        self.gamma_key = bytearray()
-        for i, char in enumerate(serial):
-            self.gamma_key.append((ord(char) + i) & 0xFF)
-        
-        # Extend key to at least 16 bytes
-        while len(self.gamma_key) < 16:
-            self.gamma_key.append(self.gamma_key[len(self.gamma_key) % len(serial)])
-
-    def encrypt(self, data: bytes | bytearray) -> bytes:
-        """Encrypt data using XOR with gamma key.
-
-        The key stream restarts at index 0 for every packet.
-        """
-        if not self.gamma_key:
-            self.init_key()
-
-        key_len = len(self.gamma_key)
-        return bytes(byte ^ self.gamma_key[i % key_len] for i, byte in enumerate(data))
-
-    def decrypt(self, data: bytes | bytearray) -> bytes:
-        """Decrypt data using XOR with gamma key (same as encrypt for XOR)."""
-        return self.encrypt(data)
+# Serial number prefix -> model (wh/b0.java x()).
+NINEBOT_SERIAL_MODELS = {
+    "N1OC": "One C", "N1OE": "One E", "N1OP": "One P",
+    "N2OA": "One A1", "N2OC": "One C+", "N2OE": "One E+", "N2OP": "One P",
+    "N2OS": "One S2",
+    "N3OL": "One Z6", "N3OS": "One Z8", "N3OT": "One Z10",
+}
 
 
-class NinebotUnpacker:
-    """Unpacker for Ninebot protocol frames.
-    
-    Frame format: 55 AA [len] [addr] [cmd] [data...] [checksum] [checksum]
-    """
+def _ninebot_checksum(body: bytes) -> bytes:
+    """0xFFFF minus the byte sum, little-endian (yh/a.java w(), yh/b.java x())."""
+    return struct.pack("<H", (0xFFFF - sum(body)) & 0xFFFF)
 
-    def __init__(self) -> None:
-        self.buffer = bytearray()
-        self.state = UnpackerState.UNKNOWN
-        self.length = 0
 
-    def add_char(self, c: int) -> bool:
-        """Add a character to the buffer. Returns True when frame is complete."""
-        if self.state == UnpackerState.UNKNOWN:
-            if c == 0x55:
-                self.buffer.clear()
-                self.buffer.append(c)
-                self.state = UnpackerState.LENSEARCH
-            return False
-        
-        elif self.state == UnpackerState.LENSEARCH:
-            self.buffer.append(c)
-            if len(self.buffer) == 2:
-                if c == 0xAA:
-                    # Valid header 55 AA
-                    self.state = UnpackerState.LENSEARCH
-                else:
-                    # Invalid, reset
-                    self.state = UnpackerState.UNKNOWN
-            elif len(self.buffer) == 3:
-                # This is the length byte
-                self.length = c
-                self.state = UnpackerState.COLLECTING
-            return False
-        
-        elif self.state == UnpackerState.COLLECTING:
-            self.buffer.append(c)
-            # Frame complete when we have: header(2) + len(1) + addr(1) + cmd(1) + data(len-2) + checksum(2)
-            expected_length = 2 + 1 + self.length + 2
-            if len(self.buffer) >= expected_length:
-                self.state = UnpackerState.DONE
-                return True
-            return False
-        
-        return False
-
-    def get_frame(self) -> Optional[bytes]:
-        """Get the complete frame if available."""
-        if self.state == UnpackerState.DONE:
-            frame = bytes(self.buffer)
-            self.buffer.clear()
-            self.state = UnpackerState.UNKNOWN
-            return frame
+def _ninebot_version(raw: int) -> Optional[str]:
+    """Firmware word -> "a.b.c"; 0 means no such component (wh/b0.java w())."""
+    if raw <= 0:
         return None
+    return f"{(raw >> 8) & 15}.{(raw >> 4) & 15}.{raw & 15}"
 
 
-class NinebotDecoder(EucDecoder):
-    """Decoder for Ninebot wheels (standard protocol).
-    
-    Protocol: 55 AA framing with XOR encryption
-    - Requires bidirectional communication (request/response)
-    - Uses XOR encryption with gamma key
-    - Frame structure: 55 AA [len] [addr] [cmd] [data...] [checksum]
-    """
+class _NinebotBase(EucDecoder):
+    """Shared request state machine and register decoding for both variants."""
+
+    HEADER: bytes = b""
+    # name -> (addr, argtype, cmd, data); data is the number of bytes to read.
+    REQUESTS: dict[str, tuple[int, int, int, bytes]] = {}
+    INIT_SEQUENCE: tuple[str, ...] = ()
+    SPEED_SCALE = 0.001
+    BATTERY_CURRENT_SIGNED = True
+    MAINBOARD_NEEDS_BATTERY = True   # yh/a.java case 24 vs yh/b.java case 26
+    CELLS = 15
+    VARIANT = "Ninebot"
+    RESPONSE_TIMEOUT = 0.25          # 250 ms per request (field z)
+
+    request_interval = 0.02
 
     def __init__(self) -> None:
         super().__init__()
-        self.unpacker = NinebotUnpacker()
-        self.encryption = NinebotEncryption()
-        self.system_voltage = 84.0  # Default 20S, will be detected
-        self.encryption.init_key()  # Initialize with default key
+        self._clock = time.monotonic
+        self.reset_session()
 
     @property
     def brand(self) -> WheelBrand:
         return WheelBrand.NINEBOT
 
-    def get_keepalive_packet(self) -> Optional[bytes]:
-        """Return keepalive/request packet for Ninebot."""
-        # Request live data: 55 AA [len] [addr] [cmd] [data] [checksum]
-        # Command 0x01 to BMS (addr 0x22) for live data
-        packet = bytearray([0x55, 0xAA, 0x03, 0x22, 0x01])
-        
-        # Calculate checksum (XOR of all bytes after header)
-        checksum = 0
-        for b in packet[2:]:
-            checksum ^= b
-        checksum ^= 0xFFFF  # Ninebot uses inverted checksum
-        
-        packet.extend(struct.pack("<H", checksum))
-        
-        # Encrypt the data portion (after header and length)
-        data_to_encrypt = packet[3:]
-        encrypted_data = self.encryption.encrypt(data_to_encrypt)
-        
-        return bytes(packet[:3]) + encrypted_data
+    # --- framing (overridden for Z) ---------------------------------------
 
-    def _calculate_checksum(self, data: bytes) -> int:
-        """Calculate Ninebot checksum (XOR of data bytes, inverted)."""
-        checksum = 0
-        for b in data:
-            checksum ^= b
-        return checksum ^ 0xFFFF
+    def _build_frame(self, name: str) -> bytes:
+        raise NotImplementedError
+
+    def _extract_frame(self) -> Optional[tuple[bytes, bytes]]:
+        """Return (raw, plain) for one complete valid frame in the buffer, if any."""
+        raise NotImplementedError
+
+    def _payload(self, plain: bytes) -> bytes:
+        raise NotImplementedError
+
+    def _matches_pending(self, plain: bytes) -> bool:
+        raise NotImplementedError
+
+    # --- session / state machine ------------------------------------------
+
+    def reset_session(self) -> None:
+        """Start the init handshake from scratch (EUC World e()/g())."""
+        self._buffer = bytearray()
+        self._pending: Optional[str] = None
+        self._deadline = 0.0
+        self._last: Optional[str] = None
+        self._initialising = True
+        self._cycle = -1
+        self.has_battery_1 = False
+        self.has_battery_2 = False
+        self.version: Optional[str] = None
+        self.serial: Optional[str] = None
+        self.model: Optional[str] = None
+        self._general_seen = False
+        self._values: dict[str, Any] = {}
+        self._batteries: dict[int, dict[str, Any]] = {}
+
+    def get_requests(self) -> list[bytes]:
+        """Send the next request once the previous one is answered or timed out."""
+        now = self._clock()
+        if self._pending is not None:
+            if now < self._deadline:
+                return []
+            _LOGGER.debug("%s request %s timed out", self.VARIANT, self._pending)
+            self._buffer.clear()
+            if self._initialising:
+                # Init commands are retried until answered (dc/p.java timeout handler).
+                return [self._send(self._pending, now)]
+            self._last = self._pending
+        name = self._next_request()
+        return [self._send(name, now)]
+
+    def _send(self, name: str, now: float) -> bytes:
+        self._pending = name
+        self._deadline = now + self.RESPONSE_TIMEOUT
+        return self._build_frame(name)
+
+    def _cycle_general(self) -> str:
+        self._cycle = (self._cycle + 1) % 7
+        return "READ_GENERAL"
+
+    def _finish_init(self) -> str:
+        self._initialising = False
+        return "READ_GENERAL"
+
+    def _next_request(self) -> str:
+        """EUC World's next-request choice after `self._last` (yh/a.java z())."""
+        last, cyc = self._last, self._cycle
+        b1, b2 = self.has_battery_1, self.has_battery_2
+        seq = self.INIT_SEQUENCE
+        if last is None:
+            return seq[0]
+        if last in seq[:-1]:
+            return seq[seq.index(last) + 1]
+        if last == seq[-1]:   # INIT_ACTIVATION_DATE
+            if b1:
+                return "INIT_BATTERY_1"
+            if b2:
+                return "INIT_BATTERY_2"
+            return self._finish_init()
+        nxt = {
+            "INIT_BATTERY_1": "INIT_BATTERY_1_HEALTH",
+            "INIT_BATTERY_1_HEALTH": "INIT_BATTERY_1_MFG_DATE",
+            "INIT_BATTERY_2": "INIT_BATTERY_2_HEALTH",
+            "INIT_BATTERY_2_HEALTH": "INIT_BATTERY_2_MFG_DATE",
+            "READ_GENERAL": "READ_SPEED_RANGE",
+            "READ_SPEED_RANGE": "READ_TILT_ROLL",
+        }.get(last)
+        if nxt:
+            return nxt
+        if last == "INIT_BATTERY_1_MFG_DATE":
+            return "INIT_BATTERY_2" if b2 else self._finish_init()
+        if last == "INIT_BATTERY_2_MFG_DATE":
+            return self._finish_init()
+        first = cyc == -1
+        if last == "READ_TILT_ROLL":
+            if cyc in (-1, 0):
+                return "READ_INVERTER"
+            if cyc == 1:
+                return "READ_MAINBOARD"
+            if cyc == 2:
+                return "READ_CONFIG"
+            if b1 and cyc == 3:
+                return "READ_BATTERY_1"
+            if b2 and cyc == 4:
+                return "READ_BATTERY_2"
+            if b1 and cyc == 5:
+                return "READ_BATTERY_1_CELLS"
+            if b2 and cyc == 6:
+                return "READ_BATTERY_2_CELLS"
+            return self._cycle_general()
+        follow = {
+            "READ_INVERTER": ("READ_MAINBOARD", first),
+            "READ_MAINBOARD": (
+                "READ_CONFIG", first and (b1 or not self.MAINBOARD_NEEDS_BATTERY)
+            ),
+            "READ_CONFIG": ("READ_BATTERY_1", first and b1),
+            "READ_BATTERY_1": ("READ_BATTERY_1_CELLS", first and b1),
+            "READ_BATTERY_1_CELLS": ("READ_BATTERY_2", first and b2),
+            "READ_BATTERY_2": ("READ_BATTERY_2_CELLS", first and b2),
+            "READ_BATTERY_2_CELLS": (None, False),
+        }.get(last)
+        if follow is not None:
+            target, ok = follow
+            return target if ok else self._cycle_general()
+        return "READ_GENERAL"
+
+    # --- receive -------------------------------------------------------------
 
     def decode(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Decode Ninebot protocol data."""
-        self.packet_count += 1
-        
-        # Feed data into unpacker
-        for byte in data:
-            if self.unpacker.add_char(byte):
-                frame = self.unpacker.get_frame()
-                if frame:
-                    return self._parse_frame(frame)
-        
-        return None
+        """Feed a BLE chunk; return the telemetry after each answered request."""
+        if not data:
+            return None
+        self._buffer.extend(data)
+        result = None
+        while True:
+            frame = self._extract_frame()
+            if frame is None:
+                break
+            raw, plain = frame
+            if self._pending is None or not self._matches_pending(plain):
+                continue
+            name = self._pending
+            try:
+                self._handle_response(name, raw, self._payload(plain))
+            except (struct.error, IndexError) as ex:
+                _LOGGER.debug("%s: bad %s response: %s", self.VARIANT, name, ex)
+                self.error_count += 1
+            self._last = name
+            self._pending = None
+            self._buffer.clear()
+            self.packet_count += 1
+            if self._general_seen:
+                result = self._telemetry()
+        return result
 
-    def _parse_frame(self, frame: bytes) -> Optional[dict[str, Any]]:
-        """Parse a complete Ninebot frame."""
-        if len(frame) < 7:
-            return None
-        
-        # Verify header
-        if frame[0] != 0x55 or frame[1] != 0xAA:
-            _LOGGER.warning("Invalid Ninebot frame header: %s", frame[:2].hex())
-            self.error_count += 1
-            return None
-        
-        length = frame[2]
-        if len(frame) < 3 + length + 2:
-            return None
-        
-        # Decrypt the data portion (after length byte)
-        encrypted_portion = frame[3:]
-        decrypted_portion = self.encryption.decrypt(encrypted_portion)
-        
-        # Reconstruct frame with decrypted data
-        decrypted_frame = frame[:3] + decrypted_portion
-        
-        # Extract checksum (last 2 bytes)
-        addr = decrypted_frame[3]
-        cmd = decrypted_frame[4]
-        payload = decrypted_frame[2:-2]  # length + addr + cmd + data
-        checksum_received = struct.unpack("<H", decrypted_frame[-2:])[0]
-        checksum_calculated = self._calculate_checksum(payload)
-        
-        if checksum_received != checksum_calculated:
-            _LOGGER.warning("Ninebot checksum mismatch: expected %04x, got %04x", checksum_calculated, checksum_received)
-            self.error_count += 1
-            return None
-        
-        # Parse data based on command
-        if addr == 0x22 and cmd == 0x01:  # BMS live data response
-            return self._parse_live_data(decrypted_frame[5:-2])
-        
-        return None
-
-    def _parse_live_data(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Parse Ninebot live data message."""
-        if len(data) < 30:
-            return None
-        
-        try:
-            # Ninebot live data structure (based on WheelLog)
-            voltage = struct.unpack("<H", data[0:2])[0] / 100.0
-            current = struct.unpack("<h", data[2:4])[0] / 100.0
-            speed = struct.unpack("<h", data[4:6])[0] / 100.0
-            trip_distance = struct.unpack("<I", data[6:10])[0] / 1000.0
-            total_distance = struct.unpack("<I", data[10:14])[0] / 1000.0
-            temperature = struct.unpack("<h", data[14:16])[0] / 10.0
-            
-            # Detect system voltage from first packet
-            if voltage > 60 and self.system_voltage == 84.0:
-                # Auto-detect based on voltage
-                if voltage > 150:
-                    self.system_voltage = 176.4  # 42S
-                elif voltage > 140:
-                    self.system_voltage = 151.2  # 36S
-                elif voltage > 115:
-                    self.system_voltage = 126.0  # 30S
-                elif voltage > 95:
-                    self.system_voltage = 100.8  # 24S
-                elif voltage > 75:
-                    self.system_voltage = 84.0   # 20S
-                else:
-                    self.system_voltage = 67.2   # 16S
-            
-            battery_percent = self.calculate_battery_percent(voltage, self.system_voltage)
-            
-            # Ninebot charging detection
-            is_charging = current > 0.5 and abs(speed) < 1.0
-            
-            telemetry = {
-                "voltage": voltage,
-                "speed": speed * 3.6,  # Convert to km/h
-                "trip_distance": trip_distance,
-                "total_distance": total_distance,
-                "current": current,
-                "temperature": temperature,
-                "battery_percent": battery_percent,
-                "is_charging": is_charging,
-                "charge_mode": 1 if is_charging else 0,
-                "model": "Ninebot",
-                "version": "1.0",
-                "manufacturer": "Ninebot",
-                "system_voltage": self.system_voltage,
+    def _handle_response(self, name: str, raw: bytes, p: bytes) -> None:
+        if name == "INIT_FIRMWARE_MAINBOARD":
+            self.version = _ninebot_version(struct.unpack_from("<H", p, 0)[0])
+        elif name == "INIT_FIRMWARE_OTHER":
+            # Battery firmware words; a zero word means that pack is absent.
+            self.has_battery_1 = _ninebot_version(struct.unpack_from("<H", p, 0)[0]) is not None
+            self.has_battery_2 = _ninebot_version(struct.unpack_from("<H", p, 2)[0]) is not None
+        elif name == "INIT_KEY":
+            self._set_key(raw)
+        elif name == "INIT_SERIAL":
+            self.serial = p.decode("ascii", errors="replace").rstrip("\x00")
+            self.model = NINEBOT_SERIAL_MODELS.get(self.serial[:4])
+        elif name == "READ_GENERAL":
+            v = self._values
+            v["battery_percent"] = float(struct.unpack_from("<H", p, 8)[0])        # vba
+            v["speed"] = struct.unpack_from("<H", p, 10)[0] * self.SPEED_SCALE      # vsp
+            v["total_distance"] = struct.unpack_from("<I", p, 14)[0] * 0.001        # km
+            v["trip_distance"] = struct.unpack_from("<H", p, 18)[0] * 0.01          # km
+            v["voltage"] = struct.unpack_from("<H", p, 24)[0] * 0.01
+            v["current"] = struct.unpack_from("<h", p, 26)[0] * 0.01
+            self._general_seen = True
+        elif name == "READ_INVERTER":
+            self._values["temperature"] = struct.unpack_from("<h", p, 0)[0] * 0.1    # vte
+        elif name in ("READ_BATTERY_1", "READ_BATTERY_2"):
+            status = struct.unpack_from("<H", p, 0)[0]
+            fmt = "<h" if self.BATTERY_CURRENT_SIGNED else "<H"
+            self._batteries[1 if name.endswith("1") else 2] = {
+                "charging": bool(status & 0x40),                               # vbch
+                "percent": struct.unpack_from("<H", p, 4)[0],                  # vb1
+                "current": struct.unpack_from(fmt, p, 6)[0] * 0.01,            # vcb1
+                "voltage": struct.unpack_from("<H", p, 8)[0] * 0.01,           # vvb1
+                "temperature": p[11] - 20,                                     # vteb1
             }
-            
-            self.last_telemetry = EucTelemetry(**telemetry)
-            return telemetry
-            
-        except (struct.error, IndexError) as ex:
-            _LOGGER.error("Error parsing Ninebot data: %s", ex)
-            self.error_count += 1
-            return None
+
+    def _set_key(self, raw: bytes) -> None:
+        """Only Ninebot Z has a key exchange."""
+
+    def _telemetry(self) -> dict[str, Any]:
+        v = self._values
+        packs = [self._batteries[i] for i in (1, 2) if i in self._batteries]
+        is_charging: Optional[bool] = None
+        battery_current = charging_current = charging_power = None
+        if packs:
+            # EUC World: charging if either pack's status bit 6 is set (sh/m.java).
+            is_charging = any(pack["charging"] for pack in packs)
+            battery_current = round(sum(pack["current"] for pack in packs), 2)
+            if is_charging:
+                # Sign convention of the pack current while charging is not shown
+                # by EUC World, so report the magnitude.
+                charging_current = round(abs(battery_current), 2)
+            else:
+                charging_current = 0.0
+            if v.get("voltage") is not None:
+                charging_power = round(charging_current * v["voltage"], 1)
+        return {
+            "voltage": round(v["voltage"], 2) if "voltage" in v else None,
+            "speed": round(v["speed"], 3) if "speed" in v else None,
+            "trip_distance": round(v["trip_distance"], 2) if "trip_distance" in v else None,
+            "total_distance": round(v["total_distance"], 3) if "total_distance" in v else None,
+            "current": round(v["current"], 2) if "current" in v else None,
+            "temperature": round(v["temperature"], 1) if "temperature" in v else None,
+            "battery_percent": v.get("battery_percent"),
+            "is_charging": is_charging,
+            "battery_current": battery_current,
+            "charging_current": charging_current,
+            "charging_power": charging_power,
+            "model": self.model or self.VARIANT,
+            "serial": self.serial,
+            "version": self.version,
+            "manufacturer": "Ninebot",
+            "system_voltage": None,
+        }
 
 
-class NinebotZUnpacker:
-    """Unpacker for Ninebot Z protocol frames.
-    
-    Frame format: 5A A5 [len] [addr] [cmd] [data...] [checksum] [checksum]
-    Similar to standard Ninebot but with different header
+class NinebotDecoder(_NinebotBase):
+    """Ninebot One S2/A1/C/E/P: 55 AA frames, plaintext (yh/a.java).
+
+    Frame: 55 AA len addr argtype cmd data... chk_lo chk_hi, len = data + 2,
+    checksum = 0xFFFF - sum(bytes[2:-2]). A response repeats the request's
+    addr/argtype/cmd at bytes 3/4/5.
     """
 
-    def __init__(self) -> None:
-        self.buffer = bytearray()
-        self.state = UnpackerState.UNKNOWN
-        self.length = 0
+    HEADER = bytes([0x55, 0xAA])
+    REQUESTS = {
+        "INIT_FIRMWARE_MAINBOARD": (0x11, 0x01, 0x1A, b"\x02"),
+        "INIT_FIRMWARE_OTHER": (0x11, 0x01, 0x66, b"\x06"),
+        "INIT_PASSWORD": (0x11, 0x01, 0x17, b"\x06"),
+        "INIT_SERIAL": (0x11, 0x01, 0x10, b"\x0e"),
+        "INIT_CONFIG": (0x11, 0x01, 0xD2, b"\x04"),
+        "INIT_LEDS_MODE": (0x11, 0x01, 0xC6, b"\x02"),
+        "INIT_SPEED_TILTBACK": (0x11, 0x01, 0x72, b"\x06"),
+        "INIT_TRANSPORTATION_MODE": (0x11, 0x01, 0x9D, b"\x02"),
+        "INIT_ACTIVATION_DATE": (0x11, 0x01, 0x69, b"\x02"),
+        "INIT_BATTERY_1": (0x13, 0x01, 0x10, b"\x1a"),
+        "INIT_BATTERY_1_HEALTH": (0x13, 0x01, 0x3B, b"\x02"),
+        "INIT_BATTERY_1_MFG_DATE": (0x13, 0x01, 0x20, b"\x02"),
+        "INIT_BATTERY_2": (0x14, 0x01, 0x10, b"\x1a"),
+        "INIT_BATTERY_2_HEALTH": (0x14, 0x01, 0x3B, b"\x02"),
+        "INIT_BATTERY_2_MFG_DATE": (0x14, 0x01, 0x20, b"\x02"),
+        "READ_GENERAL": (0x11, 0x01, 0xB0, b"\x20"),
+        "READ_SPEED_RANGE": (0x11, 0x01, 0x25, b"\x0c"),
+        "READ_TILT_ROLL": (0x11, 0x01, 0x61, b"\x04"),
+        "READ_INVERTER": (0x11, 0x01, 0x3E, b"\x02"),
+        "READ_MAINBOARD": (0x11, 0x01, 0x43, b"\x0a"),
+        "READ_CONFIG": (0x11, 0x01, 0xD2, b"\x04"),
+        "READ_BATTERY_1": (0x13, 0x01, 0x30, b"\x0e"),
+        "READ_BATTERY_2": (0x14, 0x01, 0x30, b"\x0e"),
+        "READ_BATTERY_1_CELLS": (0x13, 0x01, 0x40, b"\x1e"),
+        "READ_BATTERY_2_CELLS": (0x14, 0x01, 0x40, b"\x1e"),
+    }
+    INIT_SEQUENCE = (
+        "INIT_FIRMWARE_MAINBOARD", "INIT_FIRMWARE_OTHER", "INIT_PASSWORD",
+        "INIT_SERIAL", "INIT_CONFIG", "INIT_LEDS_MODE", "INIT_SPEED_TILTBACK",
+        "INIT_TRANSPORTATION_MODE", "INIT_ACTIVATION_DATE",
+    )
+    SPEED_SCALE = 0.001
+    BATTERY_CURRENT_SIGNED = True
+    MAINBOARD_NEEDS_BATTERY = True
+    CELLS = 15
+    VARIANT = "Ninebot One"
 
-    def add_char(self, c: int) -> bool:
-        """Add a character to the buffer. Returns True when frame is complete."""
-        if self.state == UnpackerState.UNKNOWN:
-            if c == 0x5A:
-                self.buffer.clear()
-                self.buffer.append(c)
-                self.state = UnpackerState.LENSEARCH
-            return False
-        
-        elif self.state == UnpackerState.LENSEARCH:
-            self.buffer.append(c)
-            if len(self.buffer) == 2:
-                if c == 0xA5:
-                    # Valid header 5A A5
-                    self.state = UnpackerState.LENSEARCH
-                else:
-                    # Invalid, reset
-                    self.state = UnpackerState.UNKNOWN
-            elif len(self.buffer) == 3:
-                # This is the length byte
-                self.length = c
-                self.state = UnpackerState.COLLECTING
-            return False
-        
-        elif self.state == UnpackerState.COLLECTING:
-            self.buffer.append(c)
-            # Frame complete when we have: header(2) + len(1) + addr(1) + cmd(1) + data(len-2) + checksum(2)
-            expected_length = 2 + 1 + self.length + 2
-            if len(self.buffer) >= expected_length:
-                self.state = UnpackerState.DONE
-                return True
-            return False
-        
-        return False
+    def _build_frame(self, name: str) -> bytes:
+        addr, arg, cmd, data = self.REQUESTS[name]
+        body = bytes([len(data) + 2, addr, arg, cmd]) + data
+        return self.HEADER + body + _ninebot_checksum(body)
 
-    def get_frame(self) -> Optional[bytes]:
-        """Get the complete frame if available."""
-        if self.state == UnpackerState.DONE:
-            frame = bytes(self.buffer)
-            self.buffer.clear()
-            self.state = UnpackerState.UNKNOWN
-            return frame
-        return None
+    @staticmethod
+    def is_valid_frame(frame: bytes) -> bool:
+        """yh/a.java b.a(): size == len + 6, 55 AA header, checksum."""
+        return (
+            len(frame) > 7
+            and frame[:2] == b"\x55\xaa"
+            and len(frame) == frame[2] + 6
+            and frame[-2:] == _ninebot_checksum(frame[2:-2])
+        )
+
+    def _extract_frame(self) -> Optional[tuple[bytes, bytes]]:
+        buf = self._buffer
+        while True:
+            start = buf.find(self.HEADER)
+            if start < 0:
+                del buf[:max(0, len(buf) - 1)]
+                return None
+            del buf[:start]
+            if len(buf) < 3:
+                return None
+            size = buf[2] + 6
+            if len(buf) < size:
+                return None
+            frame = bytes(buf[:size])
+            if self.is_valid_frame(frame):
+                del buf[:size]
+                return frame, frame
+            del buf[:2]   # not a frame start; resync
+
+    def _payload(self, plain: bytes) -> bytes:
+        return plain[6:-2]
+
+    def _matches_pending(self, plain: bytes) -> bool:
+        addr, arg, cmd, _ = self.REQUESTS[self._pending]
+        return plain[3] == addr and plain[4] == arg and plain[5] == cmd
 
 
-class NinebotZDecoder(EucDecoder):
-    """Decoder for Ninebot Z series wheels (Z6, Z8, Z10).
-    
-    Protocol: 5A A5 framing with XOR encryption
-    - Requires bidirectional communication (request/response)
-    - Uses XOR encryption with gamma key (same as standard Ninebot)
-    - Frame structure: 5A A5 [len] [addr] [cmd] [data...] [checksum]
-    - High-performance models with different frame header
+class NinebotZDecoder(_NinebotBase):
+    """Ninebot One Z6/Z8/Z10: 5A A5 frames XOR-encrypted with a session key (yh/b.java).
+
+    Frame: 5A A5 len 3E addr argtype cmd data... chk_lo chk_hi, len = data,
+    checksum = 0xFFFF - sum(bytes[2:-2]) over the plaintext. Every byte from
+    index 3 on (checksum included) is XORed with key[(i - 3) % 16]. The key
+    starts as 16 zero bytes and is replaced by bytes 7..22 of the wheel's
+    reply to INIT_KEY (addr 0x16, argtype 0x5B, cmd 0x00). A response carries
+    the request's addr at byte 3, 0x3E at byte 4 and its cmd at byte 6.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.unpacker = NinebotZUnpacker()
-        self.encryption = NinebotEncryption()
-        self.system_voltage = 126.0  # Default 30S (Z10), will be detected
-        self.encryption.init_key()  # Initialize with default key
+    HEADER = bytes([0x5A, 0xA5])
+    REQUESTS = {
+        "INIT_FIRMWARE_MAINBOARD": (0x14, 0x01, 0x1A, b"\x02"),
+        "INIT_FIRMWARE_OTHER": (0x14, 0x01, 0x66, b"\x06"),
+        "INIT_KEY": (0x16, 0x5B, 0x00, b""),
+        "INIT_SERIAL": (0x14, 0x01, 0x10, b"\x0e"),
+        "INIT_CONFIG": (0x14, 0x01, 0xD2, b"\x04"),
+        "INIT_LEDS_MODE": (0x14, 0x01, 0xC6, b"\x02"),
+        "INIT_SPEAKER_VOLUME": (0x14, 0x01, 0xF5, b"\x02"),
+        "INIT_SPEED_ALERTS": (0x14, 0x01, 0x7C, b"\x08"),
+        "INIT_SPEED_TILTBACK": (0x14, 0x01, 0x72, b"\x06"),
+        "INIT_ACTIVATION_DATE": (0x14, 0x01, 0x69, b"\x02"),
+        "INIT_BATTERY_1": (0x11, 0x01, 0x10, b"\x1a"),
+        "INIT_BATTERY_1_HEALTH": (0x11, 0x01, 0x3B, b"\x02"),
+        "INIT_BATTERY_1_MFG_DATE": (0x11, 0x01, 0x20, b"\x02"),
+        "INIT_BATTERY_2": (0x12, 0x01, 0x10, b"\x1a"),
+        "INIT_BATTERY_2_HEALTH": (0x12, 0x01, 0x3B, b"\x02"),
+        "INIT_BATTERY_2_MFG_DATE": (0x12, 0x01, 0x20, b"\x02"),
+        "READ_GENERAL": (0x14, 0x01, 0xB0, b"\x20"),
+        "READ_SPEED_RANGE": (0x14, 0x01, 0x25, b"\x0c"),   # READ_SPEED_DIST
+        "READ_TILT_ROLL": (0x14, 0x01, 0x61, b"\x04"),
+        "READ_INVERTER": (0x14, 0x01, 0x3E, b"\x02"),
+        "READ_MAINBOARD": (0x14, 0x01, 0x43, b"\x0a"),
+        "READ_CONFIG": (0x14, 0x01, 0xD2, b"\x04"),
+        "READ_BATTERY_1": (0x11, 0x01, 0x30, b"\x0e"),
+        "READ_BATTERY_2": (0x12, 0x01, 0x30, b"\x0e"),
+        "READ_BATTERY_1_CELLS": (0x11, 0x01, 0x40, b"\x1e"),
+        "READ_BATTERY_2_CELLS": (0x12, 0x01, 0x40, b"\x1e"),
+    }
+    INIT_SEQUENCE = (
+        "INIT_FIRMWARE_MAINBOARD", "INIT_FIRMWARE_OTHER", "INIT_KEY", "INIT_SERIAL",
+        "INIT_CONFIG", "INIT_LEDS_MODE", "INIT_SPEAKER_VOLUME", "INIT_SPEED_ALERTS",
+        "INIT_SPEED_TILTBACK", "INIT_ACTIVATION_DATE",
+    )
+    SPEED_SCALE = 0.01
+    BATTERY_CURRENT_SIGNED = False
+    MAINBOARD_NEEDS_BATTERY = False
+    CELLS = 14
+    VARIANT = "Ninebot One Z"
 
     @property
     def brand(self) -> WheelBrand:
         return WheelBrand.NINEBOT_Z
 
-    def get_keepalive_packet(self) -> Optional[bytes]:
-        """Return keepalive/request packet for Ninebot Z."""
-        # Request live data: 5A A5 [len] [addr] [cmd] [data] [checksum]
-        # Command 0x01 to BMS (addr 0x22) for live data
-        packet = bytearray([0x5A, 0xA5, 0x03, 0x22, 0x01])
-        
-        # Calculate checksum (XOR of all bytes after header)
-        checksum = 0
-        for b in packet[2:]:
-            checksum ^= b
-        checksum ^= 0xFFFF  # Ninebot uses inverted checksum
-        
-        packet.extend(struct.pack("<H", checksum))
-        
-        # Encrypt the data portion (after header and length)
-        data_to_encrypt = packet[3:]
-        encrypted_data = self.encryption.encrypt(data_to_encrypt)
-        
-        return bytes(packet[:3]) + encrypted_data
+    def reset_session(self) -> None:
+        super().reset_session()
+        self.key = bytes(16)
 
-    def _calculate_checksum(self, data: bytes) -> int:
-        """Calculate Ninebot Z checksum (XOR of data bytes, inverted)."""
-        checksum = 0
-        for b in data:
-            checksum ^= b
-        return checksum ^ 0xFFFF
+    def crypt(self, frame: bytes) -> bytes:
+        """XOR bytes 3.. with the session key (symmetric; yh/b.java w())."""
+        out = bytearray(frame)
+        for i in range(3, len(out)):
+            out[i] ^= self.key[(i - 3) % 16]
+        return bytes(out)
 
-    def decode(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Decode Ninebot Z protocol data."""
-        self.packet_count += 1
-        
-        # Feed data into unpacker
-        for byte in data:
-            if self.unpacker.add_char(byte):
-                frame = self.unpacker.get_frame()
-                if frame:
-                    return self._parse_frame(frame)
-        
-        return None
+    def _build_frame(self, name: str) -> bytes:
+        addr, arg, cmd, data = self.REQUESTS[name]
+        body = bytes([len(data), 0x3E, addr, arg, cmd]) + data
+        return self.crypt(self.HEADER + body + _ninebot_checksum(body))
 
-    def _parse_frame(self, frame: bytes) -> Optional[dict[str, Any]]:
-        """Parse a complete Ninebot Z frame."""
-        if len(frame) < 7:
-            return None
-        
-        # Verify header
-        if frame[0] != 0x5A or frame[1] != 0xA5:
-            _LOGGER.warning("Invalid Ninebot Z frame header: %s", frame[:2].hex())
-            self.error_count += 1
-            return None
-        
-        length = frame[2]
-        if len(frame) < 3 + length + 2:
-            return None
-        
-        # Decrypt the data portion (after length byte)
-        encrypted_portion = frame[3:]
-        decrypted_portion = self.encryption.decrypt(encrypted_portion)
-        
-        # Reconstruct frame with decrypted data
-        decrypted_frame = frame[:3] + decrypted_portion
-        
-        # Extract checksum (last 2 bytes)
-        addr = decrypted_frame[3]
-        cmd = decrypted_frame[4]
-        payload = decrypted_frame[2:-2]  # length + addr + cmd + data
-        checksum_received = struct.unpack("<H", decrypted_frame[-2:])[0]
-        checksum_calculated = self._calculate_checksum(payload)
-        
-        if checksum_received != checksum_calculated:
-            _LOGGER.warning("Ninebot Z checksum mismatch: expected %04x, got %04x", checksum_calculated, checksum_received)
-            self.error_count += 1
-            return None
-        
-        # Parse data based on command
-        if addr == 0x22 and cmd == 0x01:  # BMS live data response
-            return self._parse_live_data(decrypted_frame[5:-2])
-        
-        return None
+    @staticmethod
+    def is_valid_plain_frame(frame: bytes) -> bool:
+        """yh/b.java b.a(): size == len + 9, 5A A5 header, checksum (plaintext)."""
+        return (
+            len(frame) > 8
+            and frame[:2] == b"\x5a\xa5"
+            and len(frame) == frame[2] + 9
+            and frame[-2:] == _ninebot_checksum(frame[2:-2])
+        )
 
-    def _parse_live_data(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Parse Ninebot Z live data message."""
-        if len(data) < 30:
-            return None
-        
-        try:
-            # Ninebot Z live data structure (similar to standard but may have extended fields)
-            voltage = struct.unpack("<H", data[0:2])[0] / 100.0
-            current = struct.unpack("<h", data[2:4])[0] / 100.0
-            speed = struct.unpack("<h", data[4:6])[0] / 100.0
-            trip_distance = struct.unpack("<I", data[6:10])[0] / 1000.0
-            total_distance = struct.unpack("<I", data[10:14])[0] / 1000.0
-            temperature = struct.unpack("<h", data[14:16])[0] / 10.0
-            
-            # Try to extract model name from extended data
-            model = "Ninebot Z"
-            if len(data) > 20:
-                try:
-                    model_bytes = data[20:30]
-                    model_str = model_bytes.decode('ascii', errors='ignore').strip('\x00')
-                    if model_str and any(c.isalnum() for c in model_str):
-                        model = f"Ninebot {model_str}"
-                except:
-                    pass
-            
-            # Detect system voltage from first packet
-            if voltage > 60 and self.system_voltage == 126.0:
-                # Auto-detect based on voltage (Z series typically higher voltage)
-                if voltage > 150:
-                    self.system_voltage = 176.4  # 42S
-                elif voltage > 140:
-                    self.system_voltage = 151.2  # 36S
-                elif voltage > 115:
-                    self.system_voltage = 126.0  # 30S (Z10 default)
-                elif voltage > 95:
-                    self.system_voltage = 100.8  # 24S
-                elif voltage > 75:
-                    self.system_voltage = 84.0   # 20S (Z6/Z8)
-                else:
-                    self.system_voltage = 67.2   # 16S
-            
-            battery_percent = self.calculate_battery_percent(voltage, self.system_voltage)
-            
-            # Ninebot Z charging detection
-            is_charging = current > 0.5 and abs(speed) < 1.0
-            
-            telemetry = {
-                "voltage": voltage,
-                "speed": speed * 3.6,  # Convert to km/h
-                "trip_distance": trip_distance,
-                "total_distance": total_distance,
-                "current": current,
-                "temperature": temperature,
-                "battery_percent": battery_percent,
-                "is_charging": is_charging,
-                "charge_mode": 1 if is_charging else 0,
-                "model": model,
-                "version": "Z1.0",
-                "manufacturer": "Ninebot",
-                "system_voltage": self.system_voltage,
-            }
-            
-            self.last_telemetry = EucTelemetry(**telemetry)
-            return telemetry
-            
-        except (struct.error, IndexError) as ex:
-            _LOGGER.error("Error parsing Ninebot Z data: %s", ex)
-            self.error_count += 1
-            return None
+    def _extract_frame(self) -> Optional[tuple[bytes, bytes]]:
+        buf = self._buffer
+        while True:
+            start = buf.find(self.HEADER)
+            if start < 0:
+                del buf[:max(0, len(buf) - 1)]
+                return None
+            del buf[:start]
+            if len(buf) < 3:
+                return None
+            size = buf[2] + 9   # header and length byte are never encrypted
+            if len(buf) < size:
+                return None
+            raw = bytes(buf[:size])
+            plain = self.crypt(raw)
+            if self.is_valid_plain_frame(plain):
+                del buf[:size]
+                return raw, plain
+            del buf[:2]
+
+    def _payload(self, plain: bytes) -> bytes:
+        return plain[7:-2]
+
+    def _matches_pending(self, plain: bytes) -> bool:
+        addr, _, cmd, _ = self.REQUESTS[self._pending]
+        return plain[3] == addr and plain[4] == 0x3E and plain[6] == cmd
+
+    def _set_key(self, raw: bytes) -> None:
+        # Copied from the undecrypted reply bytes 7..22 (yh/b.java h(), case 3).
+        self.key = bytes(raw[7:23])
 
 
 def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
@@ -1778,8 +1775,10 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
     Detects protocol by examining packet headers with minimum length requirements:
     - DC 5A 5C [len]: Veteran/Leaperkim (min 4 bytes)
     - AA 55 [len] [cmd]: KingSong (min 4 bytes, cmd=0xA9 for live data)
-    - 55 AA: Gotway/Begode, which streams frames unprompted (the former
-      "55 AA DC 5A" signature does not exist in the protocol)
+    - 55 AA: Gotway/Begode, which streams frames unprompted; a chunk that is a
+      complete checksum-valid Ninebot One frame is Ninebot instead (Ninebot
+      only ever answers requests, so it is normally chosen by BLE name before
+      any data arrives - see the coordinator)
     - DC 5A [flags]: InMotion V2 (min 3 bytes, flags=0x11/0x14)
     - AA AA [len] [cmd]: InMotion V1 (min 4 bytes, CAN-style)
     - 5A A5 [len] [cmd]: Ninebot Z (min 4 bytes, Z-series header)
@@ -1787,8 +1786,11 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
     if len(data) < 2:
         return None
     
-    # 55 AA: Gotway/Begode streams 24-byte frames with this header unprompted.
+    # 55 AA: Ninebot One if the chunk is a whole valid Ninebot frame, else Gotway.
     if len(data) >= 4 and data[0] == 0x55 and data[1] == 0xAA:
+        if NinebotDecoder.is_valid_frame(bytes(data)):
+            _LOGGER.debug("Detected Ninebot One protocol (valid 55 AA frame)")
+            return NinebotDecoder()
         _LOGGER.debug("Detected Gotway/Begode protocol (55 AA header)")
         return GotwayDecoder()
     

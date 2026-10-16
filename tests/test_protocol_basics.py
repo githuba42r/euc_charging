@@ -36,11 +36,11 @@ print(f"InMotion V2 header: {inmotionv2_packet[:4].hex()}")
 assert inmotionv2_packet[0] == 0xDC and inmotionv2_packet[1] == 0x5A and inmotionv2_packet[2] != 0x5C
 print("✓ InMotion V2 protocol detection works (DC 5A flags=05)")
 
-# Test 6: Ninebot protocol detection (55 AA but NOT followed by DC 5A)
-ninebot_packet = bytes([0x55, 0xAA, 0x03, 0x22])
+# Test 6: Ninebot One header (55 AA [len] [addr]; told apart from Gotway by checksum)
+ninebot_packet = bytes([0x55, 0xAA, 0x03, 0x11])
 print(f"Ninebot header: {ninebot_packet[:4].hex()}")
-assert ninebot_packet[0] == 0x55 and ninebot_packet[1] == 0xAA and ninebot_packet[2] != 0xDC
-print("✓ Ninebot protocol detection works (55 AA 03, NOT DC)")
+assert ninebot_packet[0] == 0x55 and ninebot_packet[1] == 0xAA
+print("✓ Ninebot header check works (55 AA)")
 
 # Test 7: Ninebot Z protocol detection
 ninebotz_packet = bytes([0x5A, 0xA5, 0x03, 0x22])
@@ -106,7 +106,7 @@ print()
 print("Testing Checksum Calculations...")
 print("=" * 60)
 
-# Test XOR checksum (Ninebot style)
+# Test XOR checksum
 def xor_checksum(data):
     """Calculate XOR checksum."""
     result = 0

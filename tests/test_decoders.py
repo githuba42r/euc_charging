@@ -164,23 +164,9 @@ class TestNinebotDecoder(unittest.TestCase):
         decoder = get_decoder_by_data(packet)
         # Note: Conflicts with Gotway header, needs better detection
 
-    def test_ninebot_keepalive_packet(self):
-        """Test that keepalive packet is generated."""
-        keepalive = self.decoder.get_keepalive_packet()
-        self.assertIsNotNone(keepalive)
-        self.assertEqual(keepalive[0:2], bytes([0x55, 0xAA]))
-
-    def test_ninebot_encryption(self):
-        """Test Ninebot encryption/decryption."""
-        encryption = decoders.NinebotEncryption()
-        encryption.init_key("TEST12345678")
-        
-        original = b"Hello World!"
-        encrypted = encryption.encrypt(original)
-        decrypted = encryption.decrypt(encrypted)
-        
-        self.assertNotEqual(original, encrypted)
-        self.assertEqual(original, decrypted)
+    # The old keepalive (55 AA 03 22 01, XOR checksum) and serial-derived
+    # "encryption" tests encoded behaviour EUC World does not have; the real
+    # request/response protocol is covered in test_ninebot_euc_world.py.
 
 
 class TestNinebotZDecoder(unittest.TestCase):
@@ -196,11 +182,8 @@ class TestNinebotZDecoder(unittest.TestCase):
         decoder = get_decoder_by_data(packet)
         self.assertIsInstance(decoder, NinebotZDecoder)
 
-    def test_ninebotz_keepalive_packet(self):
-        """Test that keepalive packet is generated."""
-        keepalive = self.decoder.get_keepalive_packet()
-        self.assertIsNotNone(keepalive)
-        self.assertEqual(keepalive[0:2], bytes([0x5A, 0xA5]))
+    # The old keepalive test (5A A5 03 22 01, no 0x3E byte, wrong checksum) is
+    # replaced by the key-exchange tests in test_ninebot_euc_world.py.
 
 
 class TestProtocolDetection(unittest.TestCase):

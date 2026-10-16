@@ -35,8 +35,9 @@ from .const import (
     NINEBOT_READ_UUID, NINEBOT_WRITE_UUID,
     NINEBOT_Z_READ_UUID, NINEBOT_Z_WRITE_UUID,
     WheelBrand,
+    match_brand_by_name,
 )
-from .decoders import EucDecoder, get_decoder_by_data
+from .decoders import EucDecoder, get_decoder_by_brand, get_decoder_by_data
 from .charge_tracker import ChargeTracker
 
 if TYPE_CHECKING:
@@ -370,6 +371,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.client.connect()
                 _LOGGER.info("Successfully connected to %s (%s)", self.ble_device.address, self.ble_device.name)
 
+                # Ninebot wheels only answer requests, so their protocol can't be
+                # detected from incoming data: pick it from the BLE name up front.
+                if not self.decoder:
+                    self._preselect_decoder_by_name()
                 if self.decoder:
                     self.decoder.reset_session()
 
@@ -403,6 +408,14 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as ex:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error in connection loop")
                 await asyncio.sleep(10)
+
+    def _preselect_decoder_by_name(self) -> None:
+        """Create the decoder from the BLE name for request-driven protocols."""
+        brand = match_brand_by_name(getattr(self.ble_device, "name", None))
+        if brand in (WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z):
+            self.decoder = get_decoder_by_brand(brand)
+            _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
+            self._setup_uuids_for_brand(brand)
 
     @callback
     def _ensure_keepalive_task(self) -> None:
