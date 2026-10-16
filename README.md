@@ -10,17 +10,32 @@ A comprehensive Home Assistant integration for monitoring Electric Unicycle (EUC
 
 ### Multi-Brand Support
 
-| Brand | Status |
-|---|---|
-| **Veteran/Leaperkim** - Sherman, Abrams, Patton, Lynx, Oryx, etc. | ✅ Supported — verified on real hardware (Sherman S), including charging current |
-| **KingSong** | 🚧 In progress — parser being rewritten to match the EUC World protocol |
-| **Gotway/Begode** | 🚧 In progress — parser being rewritten to match the EUC World protocol |
-| **InMotion** - V1 (V5, V8, V10) and V2 (V11-V14) | 🚧 In progress — parser being rewritten to match the EUC World protocol |
-| **Ninebot** - One series and Z-series (Z6, Z8, Z10) | 🚧 In progress — parser being rewritten to match the EUC World protocol |
+| Brand | Status | Charging detection |
+|---|---|---|
+| **Veteran/Leaperkim** - Sherman, Abrams, Patton, Lynx, Oryx, etc. | ✅ Supported — verified on real hardware (Sherman S) | Wheel flag, plus charging current |
+| **KingSong** | ✅ Implemented — not yet verified on a real wheel | Experimental (current / voltage inference) |
+| **Gotway/Begode** | ✅ Implemented — not yet verified on a real wheel | Experimental (voltage inference) |
+| **InMotion V1** - V5, V8, V10 | ✅ Implemented — not yet verified on a real wheel | Experimental (current / voltage inference) |
+| **InMotion V2** - V9, V11-V14, P6, E20 | ✅ Implemented — not yet verified on a real wheel | Wheel flag |
+| **Ninebot** - One series (S2, A1, C, E+, P) | ✅ Implemented — not yet verified on a real wheel | Wheel flag |
+| **Ninebot Z** - Z6, Z8, Z10 | ✅ Implemented — not yet verified on a real wheel | Wheel flag |
 
-A review against the EUC World app (October 2026) found the non-Leaperkim
-parsers don't decode real wheel traffic yet. Fixes are in progress; captures
-from real wheels are very welcome — see [Contributing](#contributing).
+All parsers follow the wheels' Bluetooth protocols as implemented by WheelLog and
+the EUC World app (see [Credits](#credits)). Only Leaperkim/Veteran has been
+tested against a real wheel so far — **captures from other wheels are very
+welcome**, see [Contributing](#contributing).
+
+- **Experimental charging detection:** wheels that don't report a charging flag
+  are inferred from sustained negative battery current while stationary and/or a
+  steady voltage rise at standstill (ignoring post-ride voltage recovery). The
+  Charging sensor's `charging_method` attribute shows which method was used.
+- **Gotway/Begode:** the pack voltage depends on the model. It is detected from
+  the wheel's name/firmware where possible; otherwise Home Assistant raises a
+  Repairs notice to pick your model (also under the integration's **Configure**).
+- **InMotion V1:** wheels with a custom password are supported — you're asked for
+  the password during setup (default `000000`), and a Repairs notice appears if
+  the wheel doesn't respond.
+- **Not yet supported:** smart-BMS (per-cell) data.
 
 ### Comprehensive Monitoring
 
@@ -285,7 +300,10 @@ Supports 6 cell configurations:
 ## Credits
 
 - **Author**: Phil Gersekowski ([@githuba42r](https://github.com/githuba42r))
-- **Protocol Research**: Based on [WheelLog Android app](https://github.com/Wheellog/Wheellog.Android)
+- **Protocol Research**: Bluetooth packet parsing was developed using the
+  [WheelLog Android app](https://github.com/Wheellog/Wheellog.Android) as the
+  protocol reference, and the parsers were validated and verified against the
+  [EUC World](https://euc.world) Android app's handling of each wheel brand
 - **BLE Library**: Uses [Bleak](https://github.com/hbldh/bleak) for Bluetooth LE communication
 
 ## License
