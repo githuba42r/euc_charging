@@ -28,26 +28,39 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    DOMAIN, NOTIFY_UUID, CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT,
-    STORAGE_VERSION, STORAGE_SAVE_DELAY,
-    KINGSONG_READ_UUID, GOTWAY_READ_UUID, VETERAN_READ_UUID,
-    INMOTION_READ_UUID, INMOTION_WRITE_UUID, INMOTION_WRITE_SERVICE_UUID,
-    INMOTION_V2_SERVICE_UUID, NINEBOT_SERVICE_UUID,
-    INMOTION_V2_READ_UUID, INMOTION_V2_WRITE_UUID,
-    NINEBOT_READ_UUID, NINEBOT_WRITE_UUID,
-    NINEBOT_Z_READ_UUID, NINEBOT_Z_WRITE_UUID,
-    WheelBrand,
-    match_brand_by_name,
     CONF_GOTWAY_CELLS,
     CONF_GOTWAY_MODEL,
     CONF_INMOTION_PASSWORD,
+    CONF_RETRY_COUNT,
     DEFAULT_GOTWAY_CELLS,
     DEFAULT_INMOTION_PASSWORD,
+    DEFAULT_RETRY_COUNT,
+    DOMAIN,
     GOTWAY_MODEL_AUTO,
     GOTWAY_MODEL_CUSTOM,
+    GOTWAY_READ_UUID,
+    INMOTION_PASSWORD_MIN_SESSION_S,
     INMOTION_PASSWORD_SILENT_CONNECTS,
+    INMOTION_READ_UUID,
+    INMOTION_V2_READ_UUID,
+    INMOTION_V2_SERVICE_UUID,
+    INMOTION_V2_WRITE_UUID,
+    INMOTION_WRITE_SERVICE_UUID,
+    INMOTION_WRITE_UUID,
     ISSUE_GOTWAY_MODEL,
     ISSUE_INMOTION_PASSWORD,
+    KINGSONG_READ_UUID,
+    NINEBOT_READ_UUID,
+    NINEBOT_SERVICE_UUID,
+    NINEBOT_WRITE_UUID,
+    NINEBOT_Z_READ_UUID,
+    NINEBOT_Z_WRITE_UUID,
+    NOTIFY_UUID,
+    STORAGE_SAVE_DELAY,
+    STORAGE_VERSION,
+    VETERAN_READ_UUID,
+    WheelBrand,
+    match_brand_by_name,
 )
 from .decoders import (
     EucDecoder,
@@ -121,6 +134,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._preselected = False
         self._preselect_disabled = False
         self._connects_without_data = 0
+        self._preselect_verified = False
         # InMotion V1: connections where the password went out but no live data came back
         self._silent_password_connects = 0
         self._password_issue_open = False
@@ -550,6 +564,9 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.decoder = get_decoder_by_brand(brand)
         self._configure_decoder()
         self._preselected = True
+        # Whether the wheel's GATT services were known and confirmed the pick
+        # (e.g. FFE5 for InMotion V1); unknown via some proxies.
+        self._preselect_verified = self._gatt_service_uuids() is not None
         self._connects_without_data = 0
         _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
         self._setup_uuids_for_brand(brand)
@@ -568,9 +585,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.decoder.packet_count > 0:
             self._preselected = False   # confirmed; treat like a detected decoder
             return
-        if isinstance(self.decoder, InMotionDecoder):
-            # A silent InMotion V1 is most likely a wrong password (raised as a
-            # repair issue), not a wrong protocol: its FFE5 service was checked.
+        if isinstance(self.decoder, InMotionDecoder) and self._preselect_verified:
+            # The FFE5 service confirmed InMotion V1, so silence most likely means
+            # a wrong password (a repair issue), not a wrong protocol: keep it.
+            # Picked by name alone (services unknown), it is dropped like others.
             return
         self._connects_without_data += 1
         if self._connects_without_data > self.PRESELECT_MAX_EMPTY_CONNECTS:
@@ -595,10 +613,15 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             choice = options.get(CONF_GOTWAY_MODEL, GOTWAY_MODEL_AUTO)
             if choice == GOTWAY_MODEL_CUSTOM:
                 decoder.set_custom_pack(int(options.get(CONF_GOTWAY_CELLS, DEFAULT_GOTWAY_CELLS)))
-            elif choice != GOTWAY_MODEL_AUTO and decoder.set_model(choice):
-                pass
-            else:
-                decoder.clear_model_override()
+                return
+            if choice != GOTWAY_MODEL_AUTO:
+                if decoder.set_model(choice):
+                    return
+                _LOGGER.warning(
+                    "Stored Gotway/Begode model %r is not in the model table; "
+                    "using auto-detection", choice,
+                )
+            decoder.clear_model_override()
         elif isinstance(decoder, InMotionDecoder):
             decoder.password = data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD)
 
@@ -655,7 +678,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         decoder = self.decoder
         if not isinstance(decoder, InMotionDecoder):
             return
-        if not decoder.password_sent or decoder.values_received:
+        if not decoder.silent_after_password(INMOTION_PASSWORD_MIN_SESSION_S):
             return
         self._silent_password_connects += 1
         if self._silent_password_connects >= INMOTION_PASSWORD_SILENT_CONNECTS:
@@ -742,6 +765,8 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Stop the request loop until the next connection enables notifications
         self._requests_enabled.clear()
+        if self.decoder is not None:
+            self.decoder.mark_session_end()
 
         # Clear the device available event so we wait for it to be rediscovered
         self._device_available.clear()

@@ -218,6 +218,9 @@ ISSUE_INMOTION_PASSWORD = "inmotion_password"
 # Connections where the InMotion V1 password was sent but no live data came back
 # before the wrong-password repair issue is raised.
 INMOTION_PASSWORD_SILENT_CONNECTS = 3
+# ... counting only sessions that lasted this long after the password went out,
+# so a flaky link doesn't raise/clear the issue over and over.
+INMOTION_PASSWORD_MIN_SESSION_S = 10.0
 
 
 def is_inmotion_v1_device(name: str | None, service_uuids: Iterable[str] = ()) -> bool:

@@ -211,6 +211,14 @@ def test_create_fix_flow_dispatch():
 
 # --- coordinator wiring ---------------------------------------------------------------
 
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
 class IssueRecorder:
     def __init__(self, monkeypatch):
         self.open = {}
@@ -258,14 +266,17 @@ def test_inmotion_password_issue_after_three_silent_connects(monkeypatch):
     issues = IssueRecorder(monkeypatch)
     entry = make_entry(data={"address": "AA:BB", CONF_INMOTION_PASSWORD: "1234"})
     d = InMotionDecoder()
+    d._clock = clock = FakeClock()
     c = coordinator(entry, d)
     c._configure_decoder()
     assert d.password == "1234"
     for i in range(3):
+        d.reset_session()
         d.get_requests()          # password goes out, wheel stays silent
         assert d.password_sent
+        clock.now += 15           # session lasts 15 s
+        d.mark_session_end()
         c._check_inmotion_password()
-        d.reset_session()
     assert "inmotion_password_abc" in issues.open
     # new password -> fresh chances; successful decode clears the issue
     entry.data = {**entry.data, CONF_INMOTION_PASSWORD: "000000"}
@@ -327,3 +338,58 @@ def test_gotway_issue_not_flapped_by_reconnect(monkeypatch):
     d._probe = "done"                 # probe fails again
     c._update_issues()
     assert calls == [] and len(issues.open) == created
+
+
+def test_short_silent_sessions_not_counted(monkeypatch):
+    issues = IssueRecorder(monkeypatch)
+    d = InMotionDecoder()
+    d._clock = clock = FakeClock()
+    c = coordinator(make_entry(), d)
+    for _ in range(5):
+        d.reset_session()
+        d.get_requests()
+        clock.now += 3            # link dropped after 3 s
+        d.mark_session_end()
+        c._check_inmotion_password()
+    assert c._silent_password_connects == 0 and issues.open == {}
+
+
+@pytest.mark.parametrize("title, expected", [
+    ("LK3336", (False, False)),           # Veteran: no options
+    ("KS-S18", (False, False)),
+    ("V13-0001", (False, False)),         # InMotion V2
+    ("Ninebot S2", (False, False)),
+    ("GotWay_12345", (True, False)),
+    ("V8F-1234", (False, True)),          # InMotion V1
+    ("My wheel", (True, True)),           # unrecognised name
+])
+def test_options_before_detection_follow_title(title, expected):
+    assert config_flow.wheel_option_fields(make_entry(title=title), None) == expected
+
+
+def test_password_field_is_masked_and_not_prefilled():
+    from homeassistant.helpers.selector import TextSelectorType
+
+    fields = config_flow.password_schema_fields(*config_flow.password_defaults(
+        {CONF_INMOTION_PASSWORD: "4321"}
+    ))
+    keys = {str(k): k for k in fields}
+    assert keys[CONF_INMOTION_PASSWORD].default() == ""
+    assert keys[CONF_INMOTION_PASSWORD_MODE].default() == "custom"
+    selector = fields[keys[CONF_INMOTION_PASSWORD]]
+    assert selector.config["type"] == TextSelectorType.PASSWORD
+
+
+def test_empty_custom_password_keeps_stored_one():
+    entry = make_entry(data={"address": "AA:BB", CONF_INMOTION_PASSWORD: "4321"})
+    _, result = run_options(entry, InMotionDecoder(), {CONF_INMOTION_PASSWORD_MODE: "custom"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.data[CONF_INMOTION_PASSWORD] == "4321"
+
+
+def test_unknown_stored_model_warns_and_auto_detects(monkeypatch, caplog):
+    d = GotwayDecoder()
+    c = coordinator(make_entry(options={CONF_GOTWAY_MODEL: "No Such Wheel"}), d)
+    c._configure_decoder()
+    assert d.model is None and not d._model_forced
+    assert "not in the model table" in caplog.text

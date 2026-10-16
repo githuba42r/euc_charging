@@ -116,6 +116,9 @@ class EucDecoder(ABC):
         """Split a request into the GATT writes EUC World makes (default: one)."""
         return [packet]
 
+    def mark_session_end(self) -> None:
+        """Called by the coordinator when the connection drops."""
+
     @property
     def name(self) -> str:
         """Return the name of the decoder."""
@@ -1203,6 +1206,8 @@ class InMotionDecoder(EucDecoder):
         # Per-connection evidence for the wrong-password check.
         self.password_sent = False
         self.values_received = False
+        self._password_sent_at: Optional[float] = None
+        self._session_end: Optional[float] = None
 
     write_chunk_delay = 0.02     # Thread.sleep(20) between full pieces
 
@@ -1268,6 +1273,7 @@ class InMotionDecoder(EucDecoder):
         if self._first:
             self._first = False
             self.password_sent = True
+            self._password_sent_at = now
             return [self._send("INIT_PASSWORD", self.password_bytes(), now)]
         name = {
             "INIT_PASSWORD": "INIT_STATUS",
@@ -1277,6 +1283,16 @@ class InMotionDecoder(EucDecoder):
         if self._last == "INIT_STATUS":
             self._initialising = False
         return [self._send(name, self.REQUESTS[name][2], now)]
+
+    def mark_session_end(self) -> None:
+        self._session_end = self._clock()
+
+    def silent_after_password(self, min_seconds: float) -> bool:
+        """Last session sent the password, decoded no values, and lasted long enough."""
+        if not self.password_sent or self.values_received or self._password_sent_at is None:
+            return False
+        end = self._session_end if self._session_end is not None else self._clock()
+        return end - self._password_sent_at >= min_seconds
 
     def password_bytes(self) -> bytes:
         """Password as EUC World sends it: first 6 chars, '0'-padded to 6 (wh/v.java e())."""

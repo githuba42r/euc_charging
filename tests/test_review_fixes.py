@@ -345,3 +345,23 @@ def test_kingsong_named_wheel_still_rejects_gotway_detection():
 ])
 def test_only_trusted_charging_feeds_estimates(telemetry, expected):
     assert coord_mod._charging_for_estimates(telemetry) is expected
+
+
+
+def test_preselected_inmotion_v1_kept_only_when_service_verified():
+    # FFE5 seen: a silent V1 is kept (wrong-password case)
+    c = coordinator("V8F-1234")
+    c.client = FakeClient(services=(FFE0, INMOTION_WRITE_SERVICE_UUID))
+    c._preselect_decoder_by_name()
+    for _ in range(10):
+        c._check_preselected_decoder()
+    assert isinstance(c.decoder, InMotionDecoder)
+    # services unknown (proxy): dropped after the usual empty connects
+    c = coordinator("V8F-1234")
+    c.client = FakeClient(services=())
+    c.client.services = None
+    c._preselect_decoder_by_name()
+    assert isinstance(c.decoder, InMotionDecoder)
+    for _ in range(coord_mod.EucChargingCoordinator.PRESELECT_MAX_EMPTY_CONNECTS + 1):
+        c._check_preselected_decoder()
+    assert c.decoder is None

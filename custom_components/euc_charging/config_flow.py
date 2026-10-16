@@ -23,6 +23,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .const import (
@@ -32,22 +33,22 @@ from .const import (
     CONF_GOTWAY_MODEL,
     CONF_INMOTION_PASSWORD,
     CONF_INMOTION_PASSWORD_MODE,
+    CONF_MIN_PRESSURE_PSI,
+    CONF_WHEEL_ADDRESS,
     DEFAULT_GOTWAY_CELLS,
     DEFAULT_INMOTION_PASSWORD,
+    DEFAULT_MIN_PRESSURE_PSI,
+    DEVICE_NAMES,
+    DOMAIN,
+    ENTRY_TYPE_TPMS,
     GOTWAY_MODEL_AUTO,
     GOTWAY_MODEL_CUSTOM,
     INMOTION_PASSWORD_MAX_LEN,
     PASSWORD_MODE_CUSTOM,
     PASSWORD_MODE_DEFAULT,
+    SERVICE_UUID,
     WheelBrand,
     is_inmotion_v1_device,
-    CONF_MIN_PRESSURE_PSI,
-    CONF_WHEEL_ADDRESS,
-    DEFAULT_MIN_PRESSURE_PSI,
-    DEVICE_NAMES,
-    DOMAIN,
-    ENTRY_TYPE_TPMS,
-    SERVICE_UUID,
     is_tpms_entry,
     match_brand_by_name,
 )
@@ -102,26 +103,34 @@ def password_schema_fields(mode: str, password: str) -> dict:
             )
         ),
         vol.Optional(CONF_INMOTION_PASSWORD, default=password): TextSelector(
-            TextSelectorConfig()
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
     }
 
 
-def resolve_password(user_input: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return (password, error key) from the password fields."""
+def resolve_password(
+    user_input: dict[str, Any], current: str | None = None
+) -> tuple[str | None, str | None]:
+    """Return (password, error key) from the password fields.
+
+    The stored custom password is never shown again, so an empty field with
+    Custom selected keeps the current custom password.
+    """
     if user_input.get(CONF_INMOTION_PASSWORD_MODE, PASSWORD_MODE_DEFAULT) != PASSWORD_MODE_CUSTOM:
         return DEFAULT_INMOTION_PASSWORD, None
     password = (user_input.get(CONF_INMOTION_PASSWORD) or "").strip()
+    if not password and current and current != DEFAULT_INMOTION_PASSWORD:
+        return current, None
     if not password or len(password) > INMOTION_PASSWORD_MAX_LEN or not password.isascii():
         return None, "invalid_password"
     return password, None
 
 
 def password_defaults(data: dict[str, Any]) -> tuple[str, str]:
-    """(mode, password) to pre-fill the form from stored entry data."""
+    """(mode, password) to pre-fill the form: never the stored password itself."""
     password = data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD)
     mode = PASSWORD_MODE_DEFAULT if password == DEFAULT_INMOTION_PASSWORD else PASSWORD_MODE_CUSTOM
-    return mode, ("" if mode == PASSWORD_MODE_DEFAULT else password)
+    return mode, ""
 
 
 def build_wheel_options(entries: Iterable[ConfigEntry]) -> list[SelectOptionDict]:
@@ -445,12 +454,15 @@ class TpmsOptionsFlow(OptionsFlow):
 def wheel_option_fields(entry: ConfigEntry, brand: WheelBrand | None) -> tuple[bool, bool]:
     """Which settings apply: (Gotway model, InMotion V1 password).
 
-    The brand is only known once the coordinator has detected the protocol
-    (or picked it from the name), so an undetected wheel gets both - a silent
-    InMotion V1 with the wrong password is exactly such a wheel.
+    Uses the brand the coordinator detected; before detection, the brand the
+    entry title (BLE name) maps to; a wheel matching neither gets both - a
+    silent InMotion V1 with an unrecognised name is exactly such a wheel.
     """
     if brand is None:
-        return True, True
+        # Not detected yet (e.g. wheel off since HA started): go by the name.
+        brand = match_brand_by_name(entry.title)
+        if brand is None:
+            return True, True
     return (
         brand in (WheelBrand.GOTWAY, WheelBrand.BEGODE),
         brand == WheelBrand.INMOTION or CONF_INMOTION_PASSWORD in entry.data,
@@ -508,7 +520,9 @@ class WheelOptionsFlow(OptionsFlow):
             if show_gotway:
                 options.update(gotway_options_from_input(user_input))
             if show_password:
-                password, error = resolve_password(user_input)
+                password, error = resolve_password(
+                    user_input, entry.data.get(CONF_INMOTION_PASSWORD)
+                )
                 if error:
                     errors[CONF_INMOTION_PASSWORD] = error
                 elif password != entry.data.get(CONF_INMOTION_PASSWORD, DEFAULT_INMOTION_PASSWORD):

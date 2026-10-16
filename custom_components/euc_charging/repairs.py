@@ -68,7 +68,7 @@ class InMotionPasswordRepairFlow(_EntryRepairFlow):
             return self.async_abort(reason="entry_removed")
         errors: dict[str, str] = {}
         if user_input is not None:
-            password, error = resolve_password(user_input)
+            password, error = resolve_password(user_input, entry.data.get(CONF_INMOTION_PASSWORD))
             if error:
                 errors[CONF_INMOTION_PASSWORD] = error
             else:
