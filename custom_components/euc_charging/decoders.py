@@ -924,214 +924,222 @@ class GotwayDecoder(EucDecoder):
         return euc_world_curve_percent(voltage, *curve)
 
 
-# Placeholder decoders for InMotion and Ninebot
-# These require more complex protocol handling with requests/responses
+# --- InMotion V1 (V5/V8/V10/Glide 3 family), per EUC World 2.68.0 (wh/v.java) ---
 
-class InMotionUnpacker:
-    """Unpacker for InMotion V1 protocol CAN-style frames.
-    
-    Frame format: AA AA [len] [data...] [checksum] [checksum]
-    Special escape: A5 -> escaped
-    """
-
-    def __init__(self) -> None:
-        self.buffer = bytearray()
-        self.state = UnpackerState.UNKNOWN
-        self.length = 0
-        self.escape_next = False
-
-    def add_char(self, c: int) -> bool:
-        """Add a character to the buffer. Returns True when frame is complete."""
-        if self.state == UnpackerState.UNKNOWN:
-            if c == 0xAA:
-                self.buffer.clear()
-                self.buffer.append(c)
-                self.state = UnpackerState.LENSEARCH
-            return False
-        
-        elif self.state == UnpackerState.LENSEARCH:
-            self.buffer.append(c)
-            if len(self.buffer) == 2:
-                if c == 0xAA:
-                    # Valid header AA AA
-                    self.state = UnpackerState.LENSEARCH
-                else:
-                    # Invalid, reset
-                    self.state = UnpackerState.UNKNOWN
-            elif len(self.buffer) == 3:
-                # This is the length byte
-                self.length = c
-                self.state = UnpackerState.COLLECTING
-            return False
-        
-        elif self.state == UnpackerState.COLLECTING:
-            # Check for escape sequence (A5)
-            if c == 0xA5 and not self.escape_next:
-                self.escape_next = True
-                return False
-            
-            if self.escape_next:
-                # Un-escape the data
-                self.buffer.append(c)
-                self.escape_next = False
-            else:
-                self.buffer.append(c)
-            
-            # Frame complete when we have: header(2) + len(1) + data(len) + checksum(2)
-            expected_length = 2 + 1 + self.length + 2
-            if len(self.buffer) >= expected_length:
-                self.state = UnpackerState.DONE
-                return True
-            return False
-        
-        return False
-
-    def get_frame(self) -> Optional[bytes]:
-        """Get the complete frame if available."""
-        if self.state == UnpackerState.DONE:
-            frame = bytes(self.buffer)
-            self.buffer.clear()
-            self.state = UnpackerState.UNKNOWN
-            return frame
-        return None
+# Car-type id (status reply byte 104, prefixed by byte 107 when > 0) -> model.
+INMOTION_V1_MODELS = {
+    0: "R1N", 1: "R1S", 2: "R1CF", 3: "R1AP", 4: "R1EX", 6: "R1T", 7: "R10",
+    10: "V3", 11: "V3C", 12: "V3PRO", 13: "V3S", 20: "R2", 21: "R2N", 22: "R2S",
+    24: "R2EX", 30: "R0", 50: "V5", 51: "V5+", 52: "V5F", 53: "V5F+", 60: "L6",
+    61: "Lively", 80: "V8", 85: "Solowheel Glide 3", 86: "V8F", 87: "V8S",
+    100: "V10S", 101: "V10SF", 140: "V10", 141: "V10F", 142: "V10T", 143: "V10FT",
+}
 
 
 class InMotionDecoder(EucDecoder):
-    """Decoder for InMotion wheels (V1 protocol).
-    
-    Protocol: CAN-style framing with AA AA header
-    - Requires bidirectional communication (request/response)
-    - Uses data escaping with A5
-    - Includes checksum validation
-    - Requires password authentication on some models
+    """InMotion V1 (CAN-over-BLE) decoder, following EUC World (wh/v.java).
+
+    Request (21 bytes, written to FFE9): AA AA, request id (int32 LE) at 2,
+    data at 6..13 (eight 0xFF when none), data length at 14 (0xFE = none),
+    0x05 at 15, frame format at 16 (0 standard), type at 17 (0 data,
+    1 remote), byte-sum checksum of bytes 2..17 at 18, 55 55. EUC World does
+    not escape requests.
+
+    Reply: a notification starting AA AA restarts the buffer; the frame is
+    complete when it is longer than 20 bytes and ends 55 55. 0xA5 escapes the
+    next byte. The byte at len-3 is the sum of bytes 2..len-4; the id must
+    match the pending request. Extended frames (byte 14 = 0xFE, byte 16 != 0)
+    carry their payload in bytes 18..len-4.
+
+    Sequence: INIT_PASSWORD -> INIT_STATUS, then READ_VALUES / READ_STATUS
+    alternately, one request 50 ms after each reply, 500 ms timeout (init
+    requests retried; afterwards up to 3 consecutive timeouts are skipped).
+    EUC World reads no charging flag or battery percent for V1: battery
+    percent is its default curve (68 V 0 %, 74.5 V 50 %, 82.5 V 100 %).
     """
 
-    request_interval = 0.025  # keepalive every 25 ms
+    # name -> (request id, type: 0 data / 1 remote, default data)
+    REQUESTS = {
+        "INIT_PASSWORD": (257229575, 0, bytes([48, 48, 48, 48, 48, 48, 0, 0])),
+        "INIT_STATUS": (257229076, 1, None),
+        "READ_VALUES": (257229075, 0, None),
+        "READ_STATUS": (257229076, 1, None),
+    }
+    PASSWORD = b"000000"          # EUC World default when none is configured
+    SEND_DELAY = 0.05             # Y = 50 ms
+    RESPONSE_TIMEOUT = 0.5        # X = 500 ms
+    MAX_SKIPPED_TIMEOUTS = 3
+    BATTERY_CURVE = ((68.0, 74.5, 82.5), (0.0, 50.0, 100.0))   # zh/a.java K
+    SYSTEM_VOLTAGE = 84.0         # gauge max 85 V = 20 x 4.25 (zh/a.java b())
+
+    request_interval = 0.02
 
     def __init__(self) -> None:
         super().__init__()
-        self.unpacker = InMotionUnpacker()
-        self.system_voltage = 84.0  # Default 20S, will be detected
-        self.password_sent = False
+        self._clock = time.monotonic
+        self.reset_session()
 
     @property
     def brand(self) -> WheelBrand:
         return WheelBrand.INMOTION
 
-    def get_keepalive_packet(self) -> Optional[bytes]:
-        """Return keepalive/request packet for InMotion V1."""
-        # Request live data: AA AA 09 01 01 01 01 01 01 01 01 01 [checksum]
-        # Simplified request for live data
-        return bytes([0xAA, 0xAA, 0x09, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00])
+    def reset_session(self) -> None:
+        self._buffer = bytearray()
+        self._pending: Optional[str] = None
+        self._last: Optional[str] = None
+        self._initialising = True
+        self._timeouts = 0
+        self._deadline = 0.0
+        self._next_send = self._clock()
+        self._first = True
+        self.model: Optional[str] = None
+        self.version: Optional[str] = None
+        self.serial: Optional[str] = None
+        self._values: dict[str, Any] = {}
 
-    def _calculate_checksum(self, data: bytes) -> int:
-        """Calculate InMotion checksum (sum of all bytes)."""
-        return sum(data) & 0xFFFF
+    @classmethod
+    def build_request(cls, name: str, data: Optional[bytes]) -> bytes:
+        req_id, req_type, _ = cls.REQUESTS[name]
+        frame = bytearray(21)
+        if data is None:
+            frame[6:14] = b"\xff" * 8
+            frame[14] = 0xFE
+        else:
+            frame[6:6 + len(data)] = data
+            frame[14] = len(data)
+        frame[0:2] = b"\xaa\xaa"
+        struct.pack_into("<i", frame, 2, req_id)
+        frame[15] = 5
+        frame[16] = 0
+        frame[17] = req_type
+        frame[18] = sum(frame[2:18]) & 0xFF
+        frame[19] = frame[20] = 0x55
+        return bytes(frame)
+
+    def get_requests(self) -> list[bytes]:
+        now = self._clock()
+        if self._pending is not None:
+            if now < self._deadline:
+                return []
+            self._timeouts += 1
+            if self._initialising or self._timeouts > self.MAX_SKIPPED_TIMEOUTS:
+                # Retry with the request's default data (wh/t.java).
+                return [self._send(self._pending, self.REQUESTS[self._pending][2], now)]
+            self._last = self._pending
+            self._pending = None
+            self._next_send = now
+        if now < self._next_send:
+            return []
+        if self._first:
+            self._first = False
+            return [self._send("INIT_PASSWORD", self.PASSWORD, now)]
+        name = {
+            "INIT_PASSWORD": "INIT_STATUS",
+            "INIT_COMM": "INIT_STATUS",
+            "READ_VALUES": "READ_STATUS",
+        }.get(self._last or "", "READ_VALUES")
+        if self._last == "INIT_STATUS":
+            self._initialising = False
+        return [self._send(name, self.REQUESTS[name][2], now)]
+
+    def _send(self, name: str, data: Optional[bytes], now: float) -> bytes:
+        self._pending = name
+        self._deadline = now + self.RESPONSE_TIMEOUT
+        return self.build_request(name, data)
+
+    @staticmethod
+    def unescape(frame: bytes) -> bytes:
+        out = bytearray()
+        escaped = False
+        for b in frame:
+            if b == 0xA5 and not escaped:
+                escaped = True
+                continue
+            out.append(b)
+            escaped = False
+        return bytes(out)
 
     def decode(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Decode InMotion V1 protocol data."""
-        self.packet_count += 1
-        
-        # Feed data into unpacker
-        for byte in data:
-            if self.unpacker.add_char(byte):
-                frame = self.unpacker.get_frame()
-                if frame:
-                    return self._parse_frame(frame)
-        
-        return None
-
-    def _parse_frame(self, frame: bytes) -> Optional[dict[str, Any]]:
-        """Parse a complete InMotion V1 frame."""
-        if len(frame) < 5:
+        if not data:
             return None
-        
-        # Verify header
-        if frame[0] != 0xAA or frame[1] != 0xAA:
-            _LOGGER.warning("Invalid InMotion frame header: %s", frame[:2].hex())
-            self.error_count += 1
+        if data[:2] == b"\xaa\xaa":
+            self._buffer.clear()
+        self._buffer.extend(data)
+        buf = bytes(self._buffer)
+        if not (buf[:2] == b"\xaa\xaa" and len(buf) > 20 and buf[-2:] == b"\x55\x55"):
             return None
-        
-        length = frame[2]
-        if len(frame) < 3 + length + 2:
+        frame = self.unescape(buf)
+        if len(frame) < 21 or (sum(frame[2:-3]) & 0xFF) != frame[-3]:
             return None
-        
-        # Extract checksum (last 2 bytes)
-        payload = frame[2:2+length+1]  # length byte + data
-        checksum_received = struct.unpack(">H", frame[-2:])[0]
-        checksum_calculated = self._calculate_checksum(payload)
-        
-        if checksum_received != checksum_calculated:
-            _LOGGER.warning("InMotion checksum mismatch: expected %04x, got %04x", checksum_calculated, checksum_received)
-            self.error_count += 1
+        req_id = struct.unpack_from("<i", frame, 2)[0]
+        if self._pending is None or self.REQUESTS[self._pending][0] != req_id:
             return None
-        
-        # Parse data based on message type (first data byte after length)
-        msg_type = frame[3] if len(frame) > 3 else 0
-        
-        if msg_type == 0x01:  # Live data response
-            return self._parse_live_data(frame[3:])
-        
-        return None
-
-    def _parse_live_data(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Parse InMotion live data message."""
-        if len(data) < 30:
-            return None
-        
+        name = self._pending
+        self._pending = None
+        self._last = name
+        self._timeouts = 0
+        self._next_send = self._clock() + self.SEND_DELAY
+        self._buffer.clear()
+        length, fmt = frame[14], frame[16]
+        if length == 0xFE and fmt != 0:
+            payload = frame[18:-3]
+        elif length < 9 and fmt == 0:
+            payload = frame[6:6 + length]
+        else:
+            payload = b""
         try:
-            # InMotion V1 live data structure (approximate, needs verification)
-            voltage = struct.unpack(">H", data[1:3])[0] / 100.0
-            speed = struct.unpack(">h", data[3:5])[0] / 100.0
-            trip_distance = struct.unpack(">I", data[5:9])[0] / 1000.0
-            total_distance = struct.unpack(">I", data[9:13])[0] / 1000.0
-            current = struct.unpack(">h", data[13:15])[0] / 100.0
-            temperature = struct.unpack(">h", data[15:17])[0] / 100.0
-            
-            # Detect system voltage from first packet
-            if voltage > 60 and self.system_voltage == 84.0:
-                # Auto-detect based on voltage
-                if voltage > 150:
-                    self.system_voltage = 176.4  # 42S
-                elif voltage > 140:
-                    self.system_voltage = 151.2  # 36S
-                elif voltage > 115:
-                    self.system_voltage = 126.0  # 30S
-                elif voltage > 95:
-                    self.system_voltage = 100.8  # 24S
-                elif voltage > 75:
-                    self.system_voltage = 84.0   # 20S
-                else:
-                    self.system_voltage = 67.2   # 16S
-            
-            battery_percent = self.calculate_battery_percent(voltage, self.system_voltage)
-            
-            # InMotion charging detection (current > 0 and speed ~= 0)
-            is_charging = current > 0.5 and abs(speed) < 1.0
-            
-            telemetry = {
-                "voltage": voltage,
-                "speed": speed * 3.6,  # Convert to km/h
-                "trip_distance": trip_distance,
-                "total_distance": total_distance,
-                "current": current,
-                "temperature": temperature,
-                "battery_percent": battery_percent,
-                "is_charging": is_charging,
-                "charge_mode": 1 if is_charging else 0,
-                "model": "InMotion V1",
-                "version": "1.0",
-                "manufacturer": "InMotion",
-                "system_voltage": self.system_voltage,
-            }
-            
-            self.last_telemetry = EucTelemetry(**telemetry)
-            return telemetry
-            
+            if name in ("INIT_STATUS", "READ_STATUS"):
+                self._parse_status(payload)
+            elif name == "READ_VALUES":
+                self._parse_values(payload)
+                self.packet_count += 1
+                return self._telemetry()
         except (struct.error, IndexError) as ex:
-            _LOGGER.error("Error parsing InMotion data: %s", ex)
+            _LOGGER.debug("InMotion V1: bad %s reply: %s", name, ex)
             self.error_count += 1
-            return None
+        return None
+
+    def _parse_status(self, p: bytes) -> None:
+        self.serial = f"{struct.unpack_from('<q', p, 0)[0]:08X}"
+        self.version = f"{p[27]}.{p[26]}.{struct.unpack_from('<H', p, 24)[0]}"
+        if 104 < len(p):
+            hi = struct.unpack_from("b", p, 107)[0]
+            lo = struct.unpack_from("b", p, 104)[0]
+            car_type = int(f"{hi}{lo}") if hi > 0 else lo
+            self.model = INMOTION_V1_MODELS.get(car_type)
+
+    def _parse_values(self, p: bytes) -> None:
+        v = self._values
+        a, b = struct.unpack_from("<ii", p, 12)
+        v["speed"] = abs(a + b) * 3.6 / 7624.0
+        v["voltage"] = struct.unpack_from("<i", p, 20)[0] * 0.01
+        # EUC World widens this int32 as unsigned (k1.e); read signed so a
+        # negative current is not reported as ~42.9 million A.
+        v["current"] = struct.unpack_from("<i", p, 24)[0] * 0.01
+        v["temperature"] = float(struct.unpack_from("b", p, 32)[0])
+        v["trip_distance"] = struct.unpack_from("<I", p, 44)[0] * 0.001
+        v["total_distance"] = struct.unpack_from("<I", p, 48)[0] * 0.001
+
+    def _telemetry(self) -> dict[str, Any]:
+        v = self._values
+        return {
+            "voltage": round(v["voltage"], 2),
+            "speed": round(v["speed"], 2),
+            "trip_distance": round(v["trip_distance"], 3),
+            "total_distance": round(v["total_distance"], 3),
+            "current": round(v["current"], 2),
+            "temperature": v["temperature"],
+            "battery_percent": euc_world_curve_percent(v["voltage"], *self.BATTERY_CURVE),
+            "is_charging": None,
+            "charging_current": None,
+            "charging_power": None,
+            "battery_current": None,
+            "model": self.model or "InMotion",
+            "version": self.version,
+            "serial": self.serial,
+            "manufacturer": "InMotion",
+            "system_voltage": self.SYSTEM_VOLTAGE,
+        }
 
 
 class InMotionV2Unpacker:
@@ -1844,7 +1852,7 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
       only ever answers requests, so it is normally chosen by BLE name before
       any data arrives - see the coordinator)
     - DC 5A [flags]: InMotion V2 (min 3 bytes, flags=0x11/0x14)
-    - AA AA [len] [cmd]: InMotion V1 (min 4 bytes, CAN-style)
+    - AA AA: InMotion V1 (request/response; normally chosen by BLE name)
     - 5A A5 [len] [cmd]: Ninebot Z (min 4 bytes, Z-series header)
     """
     if len(data) < 2:
@@ -1877,13 +1885,11 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
         _LOGGER.debug("Detected KingSong protocol (AA 55 header)")
         return KingSongDecoder()
     
-    # Check for InMotion V1 (AA AA [len] [cmd])
-    # InMotion V1 uses CAN-style frames, len is typically 0x09-0x0F
+    # InMotion V1: AA AA frames ending 55 55 (wh/v.java). The wheel only
+    # answers requests, so it is normally preselected by BLE name.
     if len(data) >= 4 and data[0] == 0xAA and data[1] == 0xAA:
-        packet_len = data[2]
-        if packet_len >= 0x09 and packet_len <= 0x20:
-            _LOGGER.debug("Detected InMotion V1 protocol (AA AA, len=%02x)", packet_len)
-            return InMotionDecoder()
+        _LOGGER.debug("Detected InMotion V1 protocol (AA AA header)")
+        return InMotionDecoder()
     
     # Check for InMotion V2 (DC 5A [flags])
     # InMotion V2 uses flags byte after DC 5A (not 5C like Veteran)

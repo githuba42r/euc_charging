@@ -373,7 +373,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.client.connect()
                 _LOGGER.info("Successfully connected to %s (%s)", self.ble_device.address, self.ble_device.name)
 
-                # Ninebot wheels only answer requests, so their protocol can't be
+                # Ninebot/InMotion wheels only answer requests, so their protocol can't be
                 # detected from incoming data: pick it from the BLE name up front.
                 if not self.decoder:
                     self._preselect_decoder_by_name()
@@ -414,7 +414,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _preselect_decoder_by_name(self) -> None:
         """Create the decoder from the BLE name for request-driven protocols."""
         brand = match_brand_by_name(getattr(self.ble_device, "name", None))
-        if brand in (WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z):
+        if brand in (WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z, WheelBrand.INMOTION):
             self.decoder = get_decoder_by_brand(brand)
             _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
             self._setup_uuids_for_brand(brand)

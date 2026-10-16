@@ -107,11 +107,8 @@ class TestInMotionDecoder(unittest.TestCase):
         # Note: May not detect until enough data for header + length
         # Protocol detection needs improvement for InMotion
 
-    def test_inmotion_keepalive_packet(self):
-        """Test that keepalive packet is generated."""
-        keepalive = self.decoder.get_keepalive_packet()
-        self.assertIsNotNone(keepalive)
-        self.assertEqual(keepalive[0:2], bytes([0xAA, 0xAA]))
+    # The old keepalive test asserted a made-up 14-byte packet; the real
+    # 21-byte requests are covered in test_inmotion_v1_euc_world.py.
 
 
 class TestInMotionV2Decoder(unittest.TestCase):
