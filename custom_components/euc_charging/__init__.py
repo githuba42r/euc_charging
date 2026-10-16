@@ -9,14 +9,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, STORAGE_VERSION
+from .const import DOMAIN, STORAGE_VERSION, is_tpms_entry
 from .coordinator import EucChargingCoordinator
+from .tpms_coordinator import TpmsCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
+TPMS_PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Leaperkim EUC from a config entry."""
+    if is_tpms_entry(entry.data):
+        return await _async_setup_tpms_entry(hass, entry)
+
     address = entry.data[CONF_ADDRESS]
     # Don't require connectable=True as ESPHome proxies may not report this correctly
     ble_device = async_ble_device_from_address(hass, address, connectable=False)
@@ -39,10 +44,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _async_setup_tpms_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a TPMS sensor entry (advertisement listener only)."""
+    coordinator = TpmsCoordinator(hass, entry.data[CONF_ADDRESS])
+    coordinator.async_start()
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    await hass.config_entries.async_forward_entry_setups(entry, TPMS_PLATFORMS)
+    return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload a TPMS entry when its options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        coordinator: EucChargingCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+    platforms = TPMS_PLATFORMS if is_tpms_entry(entry.data) else PLATFORMS
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, platforms):
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_shutdown()
 
     return unload_ok
