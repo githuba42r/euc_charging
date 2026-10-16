@@ -141,3 +141,9 @@ def test_short_or_foreign_notifications_ignored():
 
 def test_detection():
     assert isinstance(get_decoder_by_data(live()[:4]), KingSongDecoder)
+
+
+def test_rockw_name_uses_60_83_curve():
+    d, _ = make()
+    d.decode(name("ROCKW-X-0100"))     # 3 parts -> model "ROCKW-X"
+    assert d.decode(live(voltage=7150))["battery_percent"] == 50

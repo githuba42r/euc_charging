@@ -540,6 +540,7 @@ class KingSongDecoder(EucDecoder):
         ("KS-X", (33, 42), (0, 100)),
     )
     DEFAULT_CURVE = ((50.0, 66.0), (0.0, 100.0))
+    ROCKW_CURVE = ((60.0, 83.0), (0.0, 100.0))
 
     # Gauge maximum per model (zh/a.java b()) is 4.25 V x series cells; the
     # series count recovered from it gives system_voltage = cells x 4.2 V.
@@ -663,23 +664,21 @@ class KingSongDecoder(EucDecoder):
         _LOGGER.debug("KingSong name %r -> model %s, version %s", name, self.model, self.version)
 
     def _battery_percent(self, voltage: float) -> float:
+        """EUC World default: BMS average (not decoded here) else model curve.
+
+        A wheel whose name starts "ROCKW" (rebadged GT16) uses the 60-83 V
+        curve before any model match (zh/a.java e(), fallback decompilation).
+        """
         model = self.model or ""
         volts, percents = self.DEFAULT_CURVE
-        for prefix, curve_v, curve_p in self.BATTERY_CURVES:
-            if model.startswith(prefix):
-                volts, percents = curve_v, curve_p
-                break
-        if voltage < volts[0]:
-            return float(percents[0])
-        if voltage > volts[-1]:
-            return float(percents[-1])
-        for i in range(len(volts) - 1):
-            if voltage <= volts[i + 1]:
-                span = volts[i + 1] - volts[i]
-                pct = percents[i] + (voltage - volts[i]) * (percents[i + 1] - percents[i]) / span
-                # EUC World rounds half up (fc/e.java h()).
-                return float(math.floor(pct + 0.5))
-        return float(percents[-1])
+        if (self.wheel_name or "").startswith("ROCKW"):
+            volts, percents = self.ROCKW_CURVE
+        else:
+            for prefix, curve_v, curve_p in self.BATTERY_CURVES:
+                if model.startswith(prefix):
+                    volts, percents = curve_v, curve_p
+                    break
+        return euc_world_curve_percent(voltage, volts, percents)
 
     def _series_cells(self) -> int:
         model = self.model or ""
