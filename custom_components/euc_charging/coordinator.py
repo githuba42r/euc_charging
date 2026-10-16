@@ -414,7 +414,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _preselect_decoder_by_name(self) -> None:
         """Create the decoder from the BLE name for request-driven protocols."""
         brand = match_brand_by_name(getattr(self.ble_device, "name", None))
-        if brand in (WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z, WheelBrand.INMOTION):
+        if brand in (
+            WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z,
+            WheelBrand.INMOTION, WheelBrand.INMOTION_V2,
+        ):
             self.decoder = get_decoder_by_brand(brand)
             _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
             self._setup_uuids_for_brand(brand)

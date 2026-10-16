@@ -120,14 +120,11 @@ class TestInMotionV2Decoder(unittest.TestCase):
 
     def test_inmotionv2_protocol_detection(self):
         """Test that InMotion V2 protocol is detected correctly."""
-        packet = bytes([0xDC, 0x5A, 0x05, 0x01])
-        # Note: Conflicts with Veteran header, needs better detection
+        frame = InMotionV2Decoder.build_frame(0x14, bytes([4]))
+        self.assertIsInstance(get_decoder_by_data(frame), InMotionV2Decoder)
 
-    def test_inmotionv2_keepalive_packet(self):
-        """Test that keepalive packet is generated."""
-        keepalive = self.decoder.get_keepalive_packet()
-        self.assertIsNotNone(keepalive)
-        self.assertEqual(keepalive[0:2], bytes([0xDC, 0x5A]))
+    # The old keepalive test asserted a made-up "DC 5A" frame; InMotion V2
+    # uses AA AA frames with an XOR checksum (test_inmotion_v2_euc_world.py).
 
 
 class TestNinebotDecoder(unittest.TestCase):

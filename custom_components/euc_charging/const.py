@@ -81,7 +81,7 @@ BRAND_DEVICE_NAMES = {
     WheelBrand.KINGSONG: ["KS-", "KingSong", "King Song"],
     WheelBrand.GOTWAY: ["GW", "Gotway", "Begode", "MCM", "Monster", "MSX", "Nikola", "RS"],
     WheelBrand.VETERAN: ["LK", "Sherman", "Veteran", "Abrams", "Patton", "Lynx", "Sherman L", "Oryx"],
-    WheelBrand.INMOTION: ["InMotion", "V5", "V8", "V10", "V11", "Glide"],
+    WheelBrand.INMOTION: ["InMotion", "V5", "V8", "V10", "Glide"],  # V11 is V2-only (wh/w.java)
     WheelBrand.INMOTION_V2: ["InMotion", "V11", "V12", "V13", "V14"],
     WheelBrand.NINEBOT: ["Ninebot", "Nine", "A1", "C", "E+", "P", "S2", "miniPRO"],
     WheelBrand.NINEBOT_Z: ["Ninebot Z", "Ninebot-Z", "Z6", "Z8", "Z10"],

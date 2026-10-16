@@ -98,3 +98,10 @@ def test_kingsong_has_write_path_for_name_request():
     c = bare_coordinator()
     c._setup_uuids_for_brand(WheelBrand.KINGSONG)
     assert c._write_uuid == KINGSONG_READ_UUID and c._requires_keepalive
+
+
+@pytest.mark.parametrize("name, brand", [("V8F-1234", WheelBrand.INMOTION), ("V13-5678", WheelBrand.INMOTION_V2), ("V11-0001", WheelBrand.INMOTION_V2)])
+def test_inmotion_preselected_from_ble_name(name, brand):
+    c = bare_coordinator(name)
+    c._preselect_decoder_by_name()
+    assert c.decoder.brand == brand and c._requires_keepalive
