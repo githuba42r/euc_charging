@@ -265,10 +265,29 @@ class TestBatteryCalculation(unittest.TestCase):
 
     def test_battery_half(self):
         """Test battery calculation at ~50%."""
-        # 24S ~50%: ~82V
-        percent = self.decoder.calculate_battery_percent(82.0, 100.8)
-        self.assertGreaterEqual(percent, 40.0)
-        self.assertLessEqual(percent, 60.0)
+        # WheelLog 24S curve: 50% at 80.70V + 50 * 0.195V = 90.45V
+        percent = self.decoder.calculate_battery_percent(90.45, 100.8)
+        self.assertAlmostEqual(percent, 50.0, delta=0.5)
+
+    def test_battery_low_region(self):
+        """Test the slow-discharge region below 3.40V/cell."""
+        # 82.0V = 3.42V/cell is in the upper region: (8200 - 8070) / 19.5
+        self.assertAlmostEqual(
+            self.decoder.calculate_battery_percent(82.0, 100.8), 6.7, delta=0.1
+        )
+        # 80.0V is in the lower region: (8000 - 7935) / 48.75
+        self.assertAlmostEqual(
+            self.decoder.calculate_battery_percent(80.0, 100.8), 1.3, delta=0.1
+        )
+
+    def test_battery_curve_is_monotonic(self):
+        """Percent never decreases as voltage rises (no jump at 3.40V/cell)."""
+        for system_voltage in (100.8, 126.0, 151.2, 176.4, 84.0):
+            last = -1.0
+            for centivolts in range(int(system_voltage * 70), int(system_voltage * 101)):
+                percent = self.decoder.calculate_battery_percent(centivolts / 100, system_voltage)
+                self.assertGreaterEqual(percent, last, f"{system_voltage}V at {centivolts / 100}V")
+                last = percent
 
     def test_battery_empty(self):
         """Test battery calculation at empty."""
@@ -278,8 +297,8 @@ class TestBatteryCalculation(unittest.TestCase):
 
     def test_battery_linear_mode(self):
         """Test linear battery calculation mode."""
-        # Linear should give exactly 50% at 50.4V for 100.8V system
-        percent = self.decoder.calculate_battery_percent(50.4, 100.8, use_better_percents=False)
+        # Linear spans 3.0V/cell (72.0V) to 4.2V/cell (100.8V), so 50% is 86.4V
+        percent = self.decoder.calculate_battery_percent(86.4, 100.8, use_better_percents=False)
         self.assertAlmostEqual(percent, 50.0, delta=1.0)
 
 

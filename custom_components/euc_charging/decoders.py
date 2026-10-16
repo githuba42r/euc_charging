@@ -44,6 +44,18 @@ class EucTelemetry:
     battery_current: float = 0.0  # Battery current (for BMS-equipped wheels)
     
 
+# WheelLog "better percents" curves keyed by series cell count, in centivolts:
+# (full, upper, upper_base, upper_divisor, lower_base, lower_divisor).
+# Above `upper`: (v - upper_base) / upper_divisor; above `lower_base`:
+# (v - lower_base) / lower_divisor; otherwise 0%.
+BETTER_PERCENT_CURVES: dict[int, tuple[float, ...]] = {
+    24: (10020, 8160, 8070, 19.5, 7935, 48.75),
+    30: (12525, 10200, 9975, 25.5, 9600, 67.5),
+    36: (15030, 12240, 11970, 30.6, 11520, 81),
+    42: (17535, 14280, 14123, 34.125, 13886, 85.3125),
+}
+
+
 class EucDecoder(ABC):
     """Base class for EUC protocol decoders."""
 
@@ -107,31 +119,21 @@ class EucDecoder(ABC):
             min_v = cell_config["cells"] * 3.0  # 3.0V per cell is considered empty
             return max(0.0, min(100.0, ((voltage - min_v) / (max_v - min_v)) * 100.0))
         
-        # Better non-linear calculation based on Li-ion discharge curve
-        # Based on WheelLog's "better percents" algorithm
-        voltage_raw = int(voltage * 100)
-        max_voltage_raw = int(cell_config["max_voltage"] * 100)
+        # Better non-linear calculation based on Li-ion discharge curve,
+        # using WheelLog's VeteranAdapter "better percents" constants
+        voltage_raw = voltage * 100
         cells = cell_config["cells"]
-        
-        # Thresholds (in centivolts)
-        full_threshold = max_voltage_raw - (cells * 6)  # 4.14V per cell
-        upper_threshold = cells * 340  # 3.40V per cell
-        lower_threshold = cells * 331  # 3.31V per cell
-        
-        if voltage_raw >= full_threshold:
+        full, upper, upper_base, upper_div, lower_base, lower_div = BETTER_PERCENT_CURVES.get(
+            cells, tuple(v * cells / 24 for v in BETTER_PERCENT_CURVES[24])
+        )
+
+        if voltage_raw > full:
             return 100.0
-        elif voltage_raw > upper_threshold:
-            # Linear interpolation between 3.40V and full
-            range_v = full_threshold - upper_threshold
-            current_v = voltage_raw - upper_threshold
-            return round((current_v / range_v) * 100.0, 1)
-        elif voltage_raw > lower_threshold:
-            # Slower discharge region
-            range_v = upper_threshold - lower_threshold
-            current_v = voltage_raw - lower_threshold
-            return round((current_v / range_v) * 20.0, 1)  # Only 20% in this region
-        else:
-            return 0.0
+        if voltage_raw > upper:
+            return round((voltage_raw - upper_base) / upper_div, 1)
+        if voltage_raw > lower_base:
+            return round((voltage_raw - lower_base) / lower_div, 1)
+        return 0.0
 
 
 class UnpackerState(Enum):
@@ -1148,7 +1150,6 @@ class NinebotEncryption:
 
     def __init__(self) -> None:
         self.gamma_key = bytearray()
-        self.key_index = 0
 
     def init_key(self, serial: str = "N2GUS12345678") -> None:
         """Initialize the gamma key from serial number.
@@ -1164,20 +1165,17 @@ class NinebotEncryption:
         # Extend key to at least 16 bytes
         while len(self.gamma_key) < 16:
             self.gamma_key.append(self.gamma_key[len(self.gamma_key) % len(serial)])
-        
-        self.key_index = 0
 
     def encrypt(self, data: bytes | bytearray) -> bytes:
-        """Encrypt data using XOR with gamma key."""
+        """Encrypt data using XOR with gamma key.
+
+        The key stream restarts at index 0 for every packet.
+        """
         if not self.gamma_key:
             self.init_key()
-        
-        encrypted = bytearray()
-        for byte in data:
-            encrypted.append(byte ^ self.gamma_key[self.key_index % len(self.gamma_key)])
-            self.key_index = (self.key_index + 1) % len(self.gamma_key)
-        
-        return bytes(encrypted)
+
+        key_len = len(self.gamma_key)
+        return bytes(byte ^ self.gamma_key[i % key_len] for i, byte in enumerate(data))
 
     def decrypt(self, data: bytes | bytearray) -> bytes:
         """Decrypt data using XOR with gamma key (same as encrypt for XOR)."""
