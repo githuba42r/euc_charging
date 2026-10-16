@@ -105,3 +105,17 @@ def test_inmotion_preselected_from_ble_name(name, brand):
     c = bare_coordinator(name)
     c._preselect_decoder_by_name()
     assert c.decoder.brand == brand and c._requires_keepalive
+
+
+def test_veteran_named_wheel_rejects_other_brand_detection():
+    from euc_charging.decoders import KingSongDecoder
+
+    c = bare_coordinator("LK3336")
+    assert c._detection_matches_name(VeteranDecoder())
+    assert not c._detection_matches_name(KingSongDecoder())
+    assert not c._detection_matches_name(GotwayDecoder())
+
+
+def test_unknown_name_accepts_any_detection():
+    c = bare_coordinator("Mystery")
+    assert c._detection_matches_name(GotwayDecoder())

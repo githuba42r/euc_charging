@@ -422,6 +422,23 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
             self._setup_uuids_for_brand(brand)
 
+    def _detection_matches_name(self, decoder: EucDecoder) -> bool:
+        """Reject a data-based detection that contradicts a passive brand's BLE name."""
+        hint = match_brand_by_name(getattr(self.ble_device, "name", None))
+        passive = {
+            WheelBrand.VETERAN: (WheelBrand.VETERAN, WheelBrand.LEAPERKIM),
+            WheelBrand.KINGSONG: (WheelBrand.KINGSONG,),
+            WheelBrand.GOTWAY: (WheelBrand.GOTWAY, WheelBrand.BEGODE),
+        }
+        if hint not in passive:
+            return True
+        if decoder.brand in passive[hint]:
+            return True
+        _LOGGER.debug(
+            "Ignoring %s-looking data from %s-named wheel", decoder.brand, hint
+        )
+        return False
+
     @callback
     def _ensure_keepalive_task(self) -> None:
         """Start the request loop if this protocol writes and it isn't running."""
@@ -486,17 +503,27 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             
             # Auto-detect protocol if not yet established
             if not self.decoder:
-                self.decoder = get_decoder_by_data(byte_data)
+                decoder = get_decoder_by_data(byte_data)
+                if decoder and not self._detection_matches_name(decoder):
+                    # A chunk that starts mid-frame can look like another
+                    # brand's header; trust the BLE name for passive brands.
+                    return
+                self.decoder = decoder
                 if self.decoder:
                     _LOGGER.info("Protocol detected: %s (brand: %s)", self.decoder.name, self.decoder.brand)
                     # Setup UUIDs for this brand
                     self._setup_uuids_for_brand(self.decoder.brand)
-                    self._ensure_keepalive_task()
                 else:
                     # Buffer is too short or unknown header
                     return
 
             telemetry = self.decoder.decode(byte_data)
+
+            # Protocols detected from data only start writing (Gotway/KingSong
+            # model probe) once a packet has actually decoded, so a
+            # misdetection never sends bytes to the wheel.
+            if self.decoder.packet_count > 0:
+                self._ensure_keepalive_task()
             if telemetry:
                 # Update last connected time and store last known values.
                 # Only overwrite when the packet actually carried the field, so a
