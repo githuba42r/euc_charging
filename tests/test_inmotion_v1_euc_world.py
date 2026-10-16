@@ -205,3 +205,29 @@ def test_voltage_at_24_current_at_20():
     r = feed(d, reply(READ_VALUES_ID, bytes(p)))
     assert r["voltage"] == pytest.approx(84.12)
     assert r["current"] == pytest.approx(-25.34)
+
+
+def test_custom_password_sent_and_retried_without_default():
+    d, clock = make()
+    d.password = "1234"
+    (req,) = d.get_requests()
+    assert req[6:12] == b"123400" and req[14] == 6        # EUC World pads to 6 with '0'
+    assert d.password_sent and not d.values_received
+    clock.now += 0.5
+    (retry,) = d.get_requests()
+    assert retry[6:14] == b"123400\x00\x00" and retry[14] == 8
+    assert b"000000" not in retry
+
+
+def test_long_password_truncated_to_six_like_euc_world():
+    d, _ = make()
+    d.password = "12345678"
+    assert d.password_bytes() == b"123456"
+
+
+def test_values_received_flag():
+    d, clock = make()
+    run_session(d, clock)
+    assert d.values_received
+    d.reset_session()
+    assert not d.values_received and not d.password_sent

@@ -885,6 +885,30 @@ class GotwayDecoder(EucDecoder):
                 return True
         return False
 
+    # Series cell counts offered for a custom pack: those whose full voltage
+    # (cells x 4.2 V) EUC World has a voltage ratio or curve for (int(full)).
+    CUSTOM_PACK_CELLS = (10, 16, 20, 24, 32, 36, 40, 50, 60)
+
+    def set_custom_pack(self, cells: int) -> None:
+        """Manual override with only the pack size known (cells in series)."""
+        full = round(cells * 4.2, 1)
+        self.model = GotwayModel(f"Custom {cells}S", None, full, None, 1.0, 1.0, (), ())
+        self._model_forced = True
+
+    def clear_model_override(self) -> None:
+        """Back to auto-detection: re-match from the probed name/firmware."""
+        if not self._model_forced:
+            return
+        self._model_forced = False
+        self.model = None
+        if self._probe == "done":
+            self._match_model()
+
+    @property
+    def model_unmatched(self) -> bool:
+        """Probe finished (or gave up) and no model was matched or set."""
+        return self._probe == "done" and self.model is None
+
     def _match_model(self) -> None:
         """Pick the model by wheel name, else by firmware string (EUC World order)."""
         if self._model_forced:
@@ -1113,7 +1137,7 @@ class InMotionDecoder(EucDecoder):
         "READ_VALUES": (257229075, 0, None),
         "READ_STATUS": (257229076, 1, None),
     }
-    PASSWORD = b"000000"          # EUC World default when none is configured
+    DEFAULT_PASSWORD = "000000"   # EUC World default when none is configured
     SEND_DELAY = 0.05             # Y = 50 ms
     RESPONSE_TIMEOUT = 0.5        # X = 500 ms
     MAX_SKIPPED_TIMEOUTS = 3
@@ -1126,6 +1150,7 @@ class InMotionDecoder(EucDecoder):
     def __init__(self) -> None:
         super().__init__()
         self._clock = time.monotonic
+        self.password = self.DEFAULT_PASSWORD
         self.charging = ChargingInference(use_current=True, clock=lambda: self._clock())
         self.reset_session()
 
@@ -1147,6 +1172,9 @@ class InMotionDecoder(EucDecoder):
         self.serial: Optional[str] = None
         self._values: dict[str, Any] = {}
         self.charging.reset()
+        # Per-connection evidence for the wrong-password check.
+        self.password_sent = False
+        self.values_received = False
 
     write_chunk_delay = 0.02     # Thread.sleep(20) between full pieces
 
@@ -1197,8 +1225,13 @@ class InMotionDecoder(EucDecoder):
                 return []
             self._timeouts += 1
             if self._initialising or self._timeouts > self.MAX_SKIPPED_TIMEOUTS:
-                # Retry with the request's default data (wh/t.java).
-                return [self._send(self._pending, self.REQUESTS[self._pending][2], now)]
+                # Retry with the request's data (wh/t.java). EUC World resends
+                # INIT_PASSWORD with its default "000000\0\0"; with a custom
+                # password we resend that instead, never the default.
+                data = self.REQUESTS[self._pending][2]
+                if self._pending == "INIT_PASSWORD":
+                    data = self.password_bytes() + b"\x00\x00"
+                return [self._send(self._pending, data, now)]
             self._last = self._pending
             self._pending = None
             self._next_send = now
@@ -1206,7 +1239,8 @@ class InMotionDecoder(EucDecoder):
             return []
         if self._first:
             self._first = False
-            return [self._send("INIT_PASSWORD", self.PASSWORD, now)]
+            self.password_sent = True
+            return [self._send("INIT_PASSWORD", self.password_bytes(), now)]
         name = {
             "INIT_PASSWORD": "INIT_STATUS",
             "INIT_COMM": "INIT_STATUS",
@@ -1215,6 +1249,10 @@ class InMotionDecoder(EucDecoder):
         if self._last == "INIT_STATUS":
             self._initialising = False
         return [self._send(name, self.REQUESTS[name][2], now)]
+
+    def password_bytes(self) -> bytes:
+        """Password as EUC World sends it: first 6 chars, '0'-padded to 6 (wh/v.java e())."""
+        return (self.password or self.DEFAULT_PASSWORD).ljust(6, "0")[:6].encode("ascii", "replace")
 
     def _send(self, name: str, data: Optional[bytes], now: float) -> bytes:
         self._pending = name
@@ -1266,6 +1304,7 @@ class InMotionDecoder(EucDecoder):
                 self._parse_status(payload)
             elif name == "READ_VALUES":
                 self._parse_values(payload)
+                self.values_received = True
                 self.packet_count += 1
                 return self._telemetry()
         except (struct.error, IndexError) as ex:

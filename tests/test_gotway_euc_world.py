@@ -179,3 +179,31 @@ def test_probe_gives_up_after_two_timeouts_per_request():
 
 def test_detection_55aa_is_gotway():
     assert isinstance(get_decoder_by_data(live()[:20]), GotwayDecoder)
+
+
+def test_custom_pack_and_clear_override():
+    decoder, clock = make_decoder()
+    decoder.set_custom_pack(24)
+    result = decoder.decode(live(voltage_raw=6000))
+    assert result["system_voltage"] == pytest.approx(100.8)
+    assert result["voltage"] == pytest.approx(90.0)        # int(100.8) = 100 -> x1.5
+    assert result["model"] == "Custom 24S"
+    # back to auto: the probe's name match applies again
+    decoder.wheel_name = "Master Pro"
+    decoder._probe = "done"
+    decoder.clear_model_override()
+    assert decoder.model.name == "Master Pro"
+
+
+def test_model_unmatched_after_probe():
+    decoder, clock = make_decoder()
+    assert not decoder.model_unmatched
+    clock.now += 0.25
+    decoder.get_requests()
+    clock.now += 1.5
+    decoder.get_requests()
+    clock.now += 1.5
+    decoder.get_requests()
+    assert decoder.model_unmatched
+    decoder.set_model("RS C38")
+    assert not decoder.model_unmatched
