@@ -6,7 +6,7 @@ platform (never call async_write_ha_state here).
 """
 
 import asyncio
-import importlib.util
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -246,12 +246,10 @@ def test_sensor_keeps_restored_value_when_notified_without_reading():
 def _load_integration_init():
     """Import the integration's __init__.py as a submodule of the test package."""
     path = Path(tpms_entities.__file__).with_name("__init__.py")
-    spec = importlib.util.spec_from_file_location(
-        "euc_charging._integration_init", path, submodule_search_locations=[]
-    )
-    module = importlib.util.module_from_spec(spec)
+    module = types.ModuleType("euc_charging._integration_init")
+    module.__file__ = str(path)
     module.__package__ = "euc_charging"  # resolve ".const" etc. against the test package
-    spec.loader.exec_module(module)
+    exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
     return module
 
 
