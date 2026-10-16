@@ -29,9 +29,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime
 
-from .const import DOMAIN, sanitize_wheel_id
+from .const import DOMAIN, is_tpms_entry, sanitize_wheel_id
 from .coordinator import EucChargingCoordinator
 from .charge_tracker import ChargeEstimates
+from .tpms_entities import async_setup_tpms_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -216,6 +217,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Leaperkim sensors."""
+    if is_tpms_entry(entry.data):
+        await async_setup_tpms_sensors(hass, entry, async_add_entities)
+        return
+
     coordinator: EucChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     async_add_entities(
