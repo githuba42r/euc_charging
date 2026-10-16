@@ -197,13 +197,13 @@ def test_custom_pack_and_clear_override():
 
 def test_model_unmatched_after_probe():
     decoder, clock = make_decoder()
-    assert not decoder.model_unmatched
+    assert decoder.model_unmatched is None        # still probing
     clock.now += 0.25
     decoder.get_requests()
     clock.now += 1.5
     decoder.get_requests()
     clock.now += 1.5
     decoder.get_requests()
-    assert decoder.model_unmatched
+    assert decoder.model_unmatched is True
     decoder.set_model("RS C38")
-    assert not decoder.model_unmatched
+    assert decoder.model_unmatched is False

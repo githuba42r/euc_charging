@@ -307,3 +307,23 @@ def test_translations_cover_new_strings():
     assert "select_model" in t["issues"]["gotway_model"]["fix_flow"]["step"]
     assert "password" in t["issues"]["inmotion_password"]["fix_flow"]["step"]
     assert set(t["selector"]["inmotion_password_mode"]["options"]) == {"default", "custom"}
+
+
+def test_gotway_issue_not_flapped_by_reconnect(monkeypatch):
+    """Reconnect restarts the probe: the issue must stay (so "Ignore" sticks)."""
+    issues = IssueRecorder(monkeypatch)
+    calls = []
+    monkeypatch.setattr(coord_mod.ir, "async_delete_issue",
+                        lambda hass, domain, issue_id: calls.append(("delete", issue_id)))
+    d = GotwayDecoder()
+    c = coordinator(make_entry(), d)
+    d._probe = "done"
+    c._update_issues()
+    assert "gotway_model_abc" in issues.open
+    created = len(issues.open)
+    d.reset_session()                 # reconnect: probing again
+    assert d.model_unmatched is None
+    c._update_issues()
+    d._probe = "done"                 # probe fails again
+    c._update_issues()
+    assert calls == [] and len(issues.open) == created

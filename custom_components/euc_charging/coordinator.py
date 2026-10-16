@@ -610,8 +610,10 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         decoder = self.decoder
         if isinstance(decoder, GotwayDecoder):
             unmatched = decoder.model_unmatched
-            if unmatched == self._gotway_issue_open:
-                pass   # no change; avoid touching the registry on every packet
+            if unmatched is None or unmatched == self._gotway_issue_open:
+                # Still probing (every reconnect) or no change: leave the issue
+                # alone, so an ignored issue stays ignored.
+                pass
             elif unmatched:
                 self._gotway_issue_open = True
                 ir.async_create_issue(

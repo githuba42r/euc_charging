@@ -922,9 +922,14 @@ class GotwayDecoder(EucDecoder):
             self._match_model()
 
     @property
-    def model_unmatched(self) -> bool:
-        """Probe finished (or gave up) and no model was matched or set."""
-        return self._probe == "done" and self.model is None
+    def model_unmatched(self) -> Optional[bool]:
+        """True: probe finished (or gave up) with no model. False: a model is set
+        or matched. None: still probing (e.g. after a reconnect) - undecided."""
+        if self.model is not None:
+            return False
+        if self._probe != "done":
+            return None
+        return True
 
     def _match_model(self) -> None:
         """Pick the model by wheel name, else by firmware string (EUC World order)."""
