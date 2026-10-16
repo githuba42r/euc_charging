@@ -100,12 +100,13 @@ def _name_matches(name: str, pattern: str) -> bool:
     name, pattern = name.lower(), pattern.lower()
     if len(pattern) > _SHORT_PATTERN_LEN:
         return pattern in name
-    # Short patterns must start the name and not run into more letters,
-    # so "LK14132" and "V8" match but "Cardo" does not match "C".
+    # Short patterns must start the name. A pattern ending in a letter must not
+    # run into more letters ("LK14132" matches LK, "LKQ Parts" and "Cardo" do
+    # not); one ending in a digit or symbol may ("V8F-1234", "V12HS", "KS-S18").
     if not name.startswith(pattern):
         return False
     rest = name[len(pattern):]
-    return not rest or not pattern[-1].isalnum() or not rest[0].isalpha()
+    return not rest or not (pattern[-1].isalpha() and rest[0].isalpha())
 
 
 def match_brand_by_name(name: str | None) -> WheelBrand | None:

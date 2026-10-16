@@ -26,5 +26,16 @@ class TestMatchBrandByName(unittest.TestCase):
             self.assertIsNone(match_brand_by_name(name), name)
 
 
+    def test_digit_ending_model_codes_allow_letter_suffix(self):
+        self.assertEqual(match_brand_by_name("V8F-1234"), WheelBrand.INMOTION)
+        self.assertEqual(match_brand_by_name("V5F"), WheelBrand.INMOTION)
+        self.assertEqual(match_brand_by_name("V12HS"), WheelBrand.INMOTION_V2)
+        self.assertEqual(match_brand_by_name("V12HS-ABCD"), WheelBrand.INMOTION_V2)
+
+    def test_letter_ending_patterns_still_need_boundary(self):
+        for name in ("LKQ Parts", "Cardo Packtalk", "JBL Tune 770NC-LE"):
+            self.assertIsNone(match_brand_by_name(name), name)
+
+
 if __name__ == "__main__":
     unittest.main()
