@@ -39,3 +39,13 @@ class TestMatchBrandByName(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_inmotion_v2_model_names():
+    """V9/E20/P6 are InMotion V2 models (wh/w.java INIT_ID table)."""
+    from euc_charging.const import WheelBrand, match_brand_by_name
+
+    for name in ("P6-0001", "V9-1234", "E20-0042", "V12HS-1", "V13-9"):
+        assert match_brand_by_name(name) == WheelBrand.INMOTION_V2, name
+    assert match_brand_by_name("V8F-1") == WheelBrand.INMOTION
+    assert match_brand_by_name("P") == WheelBrand.NINEBOT
