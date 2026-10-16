@@ -60,9 +60,17 @@ unavailable and blank the alarm.
 - `is_tpms_advertisement(name, manufacturer_data) -> bool` — name starts with
   `VD` (case-insensitive) and company ID `0x3000` present.
 - `TpmsCoordinator` — one per TPMS config entry. Registers
-  `bluetooth.async_register_callback` for the entry's address
-  (`BluetoothScanningMode.PASSIVE`), decodes each advert, stores
-  `reading` + `last_seen`, and notifies listeners. No polling, no timeouts.
+  `bluetooth.async_register_advertisement_callback(hass, cb, address)`, which
+  fires for every advert from the address — connectable or not, and even when
+  the data is unchanged (so Last Seen / RSSI stay current). Not
+  `async_register_callback`: a matcher without `connectable` only sees
+  connectable adverts, and these sensors never send any. On start it seeds
+  from `bluetooth.async_last_service_info(hass, address, connectable=False)`
+  when present. Each advert is decoded (non-0x3000 / short payloads ignored);
+  `reading` is stored and `last_seen` is derived from the advert's monotonic
+  receive time (`utcnow() - (MONOTONIC_TIME() - service_info.time)`, age
+  clamped at 0), so a replayed advert keeps its real age. Listeners are then
+  notified. No polling, no timeouts.
 
 ### Config flow (`config_flow.py`)
 
@@ -72,8 +80,10 @@ unavailable and blank the alarm.
 - `async_step_bluetooth` branches: if the discovery is a TPMS advert →
   `async_step_tpms_confirm`; otherwise the existing wheel path.
 - `tpms_confirm` form: name (default `TPMS <last 5 of MAC>`), optional wheel
-  (select from existing wheel config entries of this domain), minimum
-  pressure (psi, default 30).
+  (select from existing wheel config entries of this domain — built by
+  `build_wheel_options()` from non-ignored entries that have an address),
+  minimum pressure (psi, default 30).
+- The manual user step never lists VD TPMS sensors as wheels.
 - Entry data: `{address, entry_type: "tpms", wheel_address?}`; options:
   `{min_pressure_psi}`. Unique ID = sensor MAC.
 - Options flow for TPMS entries: edit minimum pressure. (Wheel entries keep
@@ -82,7 +92,9 @@ unavailable and blank the alarm.
 ### Setup (`__init__.py`)
 
 - If `entry.data["entry_type"] == "tpms"`: create `TpmsCoordinator`, forward
-  `SENSOR` + `BINARY_SENSOR` only; reload on options update. Otherwise the
+  `SENSOR` + `BINARY_SENSOR` only. Options changes do **not** reload the
+  entry (a reload would drop the reading); an update listener calls
+  `coordinator.async_notify_listeners()` so alarms re-evaluate. Otherwise the
   existing wheel setup unchanged. Existing wheel entries have no
   `entry_type` and default to the wheel path (no migration needed).
 
@@ -106,13 +118,18 @@ Device: name from entry title, manufacturer "Motoeye", model "VD TPMS". When lin
 | Low Pressure | binary_sensor | PROBLEM; on when pressure < min (psi→kPa) |
 | Low Battery | binary_sensor | BATTERY; on when battery % < 20 |
 
-Binary sensors are `None` (unknown) until a first reading exists.
+Binary sensors are `None` (unknown) until a first reading exists. Low
+Pressure reads the minimum from `entry.options` at evaluation time and keeps
+the last known `pressure_kpa` (persisted as extra restore data), so it
+re-evaluates against the current minimum on restore and on options change
+without waiting for an advert; it is unknown only if no pressure has ever been
+known. Entities notified without a reading keep their restored values.
 
 ## Error handling
 
 - Short/invalid payloads are ignored (logged at debug).
 - Adverts from other MACs never reach a coordinator (callback is
-  address-filtered).
+  registered per address).
 - A linked wheel that is later removed leaves the TPMS device standing
   (via_device is cosmetic).
 
