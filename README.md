@@ -10,13 +10,17 @@ A comprehensive Home Assistant integration for monitoring Electric Unicycle (EUC
 
 ### Multi-Brand Support
 
-Full support for all major EUC manufacturers:
+| Brand | Status |
+|---|---|
+| **Veteran/Leaperkim** - Sherman, Abrams, Patton, Lynx, Oryx, etc. | ✅ Supported — verified on real hardware (Sherman S), including charging current |
+| **KingSong** | 🚧 In progress — parser being rewritten to match the EUC World protocol |
+| **Gotway/Begode** | 🚧 In progress — parser being rewritten to match the EUC World protocol |
+| **InMotion** - V1 (V5, V8, V10) and V2 (V11-V14) | 🚧 In progress — parser being rewritten to match the EUC World protocol |
+| **Ninebot** - One series and Z-series (Z6, Z8, Z10) | 🚧 In progress — parser being rewritten to match the EUC World protocol |
 
-- ✅ **Veteran/Leaperkim** - Sherman, Abrams, Patton, Lynx, Oryx, etc.
-- ✅ **KingSong** - All models with automatic voltage detection
-- ✅ **Gotway/Begode** - Monster, MSX, Nikola, RS, MCM, etc.
-- ✅ **InMotion** - V1 protocol (V5, V8, V10) and V2 protocol (V11-V14)
-- ✅ **Ninebot** - Standard series and Z-series (Z6, Z8, Z10)
+A review against the EUC World app (October 2026) found the non-Leaperkim
+parsers don't decode real wheel traffic yet. Fixes are in progress; captures
+from real wheels are very welcome — see [Contributing](#contributing).
 
 ### Comprehensive Monitoring
 
@@ -38,16 +42,33 @@ Full support for all major EUC manufacturers:
 
 ### HACS (Recommended)
 
-1. Open HACS in Home Assistant
-2. Click on "Integrations"
-3. Click the three dots in the top right corner
-4. Select "Custom repositories"
-5. Add repository: `https://github.com/githuba42r/euc_charging`
-6. Category: Integration
-7. Click "Add"
-8. Search for "EUC Charging Monitor"
-9. Click "Download"
-10. Restart Home Assistant
+This integration is installed through [HACS](https://hacs.xyz) as a custom repository. If you don't have HACS yet, follow the [HACS installation guide](https://hacs.xyz/docs/use/download/download/) first.
+
+#### One-click install
+
+[![Open your Home Assistant instance and open this repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=githuba42r&repository=euc_charging&category=integration)
+
+1. Click the button above and confirm your Home Assistant URL if asked
+2. HACS opens the **EUC Charging Monitor** repository — click **Download** (bottom right) and confirm
+3. Restart Home Assistant (**Settings → System → ⋮ → Restart Home Assistant**)
+4. Add the integration:
+
+   [![Open your Home Assistant instance and start setting up the EUC Charging Monitor integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=euc_charging)
+
+#### Add the repository manually in HACS
+
+1. Open **HACS** from the Home Assistant sidebar
+2. Click **⋮** (top right) → **Custom repositories**
+3. Repository: `https://github.com/githuba42r/euc_charging` — Type: **Integration** — click **Add**
+4. Close the dialog, search HACS for **EUC Charging Monitor**, open it and click **Download**
+5. Restart Home Assistant
+6. Go to **Settings → Devices & Services → + Add Integration** and search for **EUC Charging Monitor**
+
+#### Updating
+
+HACS checks this repository for new releases and shows an update under **Settings → Updates** when one is available. Install it, then restart Home Assistant.
+
+> Most wheels and TPMS sensors are discovered automatically once the integration is installed — look for a **Discovered** card under **Settings → Devices & Services**.
 
 ### Manual Installation
 
@@ -108,6 +129,27 @@ The integration creates the following entities:
 
 - `binary_sensor.{device}_charging` - Charging status (on/off)
 - `binary_sensor.{device}_connected` - BLE connection status
+
+## Smart Charging Automations & Blueprints
+
+Pair the integration with a Zigbee smart plug to charge your wheel automatically:
+**nightly top-up to 95%**, **ride-day charge to 100%** with a readiness check,
+a **monthly extended balance charge**, and safety cut-offs — plus an optional
+Zigbee button by the charger.
+
+- 📖 **Guide:** [docs/charging-automations.md](docs/charging-automations.md) — strategies, hardware (plug and button with purchase links), helpers and tips
+- 🧩 **Blueprints:** [blueprints/automation/euc_charging/](blueprints/automation/euc_charging/) — import with one click from the guide
+- 📦 **Complete package:** [examples/packages/euc_charging.yaml](examples/packages/euc_charging.yaml) — helpers + all automations in one file
+- 🛠️ **Blueprint usage examples:** [examples/blueprint_usage/automations.yaml](examples/blueprint_usage/automations.yaml)
+
+| Blueprint | Import |
+|---|---|
+| Scheduled charge start | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fscheduled_charge.yaml) |
+| Stop charging at a limit | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fcharge_limit.yaml) |
+| Charge complete | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fcharge_complete.yaml) |
+| Extended balance charge | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fbalance_charge.yaml) |
+| Charger off when the wheel isn't charging | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fcharger_idle_off.yaml) |
+| Ride day readiness check | [![Import](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fgithuba42r%2Feuc_charging%2Fblob%2Fmaster%2Fblueprints%2Fautomation%2Feuc_charging%2Fride_ready_check.yaml) |
 
 ## Automations
 

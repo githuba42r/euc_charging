@@ -1,0 +1,81 @@
+blueprint:
+  name: EUC - Turn charger off when the wheel isn't charging
+  description: >
+    Safety net: if the charger plug has been on for a few minutes but the wheel
+    reports it is not charging (not plugged in, or already full), turn the plug
+    off and optionally notify. Skipped while any "skip" boolean is on or any
+    "skip" timer is running (e.g. during an extended balance charge).
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/charger_idle_off.yaml
+  input:
+    charger_switch:
+      name: Charger smart plug
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    charging_sensor:
+      name: Wheel charging sensor
+      description: The EUC Charging Monitor "Charging" binary sensor.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+    delay_minutes:
+      name: Minutes after the plug turns on
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: min
+    skip_booleans:
+      name: Skip while any of these booleans is on
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: input_boolean
+    skip_timers:
+      name: Skip while any of these timers is active
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: timer
+    notify_actions:
+      name: Notification actions
+      default: []
+      selector:
+        action: {}
+
+mode: single
+
+variables:
+  skip_booleans: !input skip_booleans
+  skip_timers: !input skip_timers
+
+triggers:
+  - trigger: state
+    entity_id: !input charger_switch
+    to: "on"
+    for:
+      minutes: !input delay_minutes
+
+conditions:
+  - condition: state
+    entity_id: !input charging_sensor
+    state: "off"
+  - condition: template
+    value_template: >
+      {{ skip_booleans | select('is_state', 'on') | list | count == 0
+         and skip_timers | select('is_state', 'active') | list | count == 0 }}
+
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: !input charger_switch
+  - choose: []
+    default: !input notify_actions

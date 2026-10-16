@@ -1,0 +1,70 @@
+blueprint:
+  name: EUC - Stop charging at a limit
+  description: >
+    Turn the charger off once the wheel's battery has stayed above a limit
+    (default 95%) for a few minutes. Keeping Li-ion packs below 100% for daily
+    use reduces cell wear. Any "override" boolean that is on (e.g. full charge
+    requested, extended balance charge) lets the charge continue to 100%.
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/charge_limit.yaml
+  input:
+    battery_sensor:
+      name: Wheel battery sensor
+      description: The EUC Charging Monitor "Battery" sensor (live, %).
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: battery
+    charger_switch:
+      name: Charger smart plug
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    limit:
+      name: Charge limit
+      default: 95
+      selector:
+        number:
+          min: 50
+          max: 99
+          unit_of_measurement: "%"
+    hold_minutes:
+      name: Minutes above limit before stopping
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: min
+    override_booleans:
+      name: Override booleans
+      description: If any of these is on, the limit is ignored (full charge, balance charge).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: input_boolean
+
+mode: single
+
+variables:
+  override_booleans: !input override_booleans
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input battery_sensor
+    above: !input limit
+    for:
+      minutes: !input hold_minutes
+
+conditions:
+  - condition: template
+    value_template: "{{ override_booleans | select('is_state', 'on') | list | count == 0 }}"
+
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: !input charger_switch

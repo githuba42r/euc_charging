@@ -1,0 +1,75 @@
+blueprint:
+  name: EUC - Scheduled charge start
+  description: >
+    Turn the EUC charger smart plug on at a set time on chosen weekdays.
+    Use one instance for the nightly top-up (every day, e.g. 00:15) and another
+    for ride days (e.g. 08:00 Sun/Wed/Fri) with "Request full charge" enabled so
+    the charge-limit automation lets the wheel reach 100%.
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/scheduled_charge.yaml
+  input:
+    charger_switch:
+      name: Charger smart plug
+      description: Switch that powers the EUC charger.
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    start_time:
+      name: Start time
+      default: "00:15:00"
+      selector:
+        time: {}
+    weekdays:
+      name: Weekdays
+      default: [mon, tue, wed, thu, fri, sat, sun]
+      selector:
+        select:
+          multiple: true
+          mode: list
+          options:
+            - { label: Monday, value: mon }
+            - { label: Tuesday, value: tue }
+            - { label: Wednesday, value: wed }
+            - { label: Thursday, value: thu }
+            - { label: Friday, value: fri }
+            - { label: Saturday, value: sat }
+            - { label: Sunday, value: sun }
+    full_charge_boolean:
+      name: Full charge boolean
+      description: input_boolean that tells the charge-limit automation to allow 100%.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    request_full_charge:
+      name: Request full charge
+      description: Turn the full charge boolean on when this schedule starts the charger (ride days).
+      default: false
+      selector:
+        boolean: {}
+
+mode: single
+
+variables:
+  request_full_charge: !input request_full_charge
+
+triggers:
+  - trigger: time
+    at: !input start_time
+
+conditions:
+  - condition: time
+    weekday: !input weekdays
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ request_full_charge }}"
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input full_charge_boolean
+  - action: switch.turn_on
+    target:
+      entity_id: !input charger_switch

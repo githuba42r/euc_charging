@@ -1,0 +1,134 @@
+# Example automations.yaml entries that use the EUC charging blueprints.
+#
+# These reproduce the strategy in examples/packages/euc_charging.yaml using
+# blueprints instead of hand-written automations. The helpers (input_boolean,
+# timer, counter, input_datetime) still need to exist - create them in the UI
+# (Settings -> Devices & services -> Helpers) or copy the helper sections from
+# the package file.
+#
+# Replace the entity IDs with your own. Creating the automations from the
+# blueprints in the UI (Settings -> Automations & scenes -> Blueprints) gives
+# you entity pickers instead.
+
+- id: euc_bp_nightly_charge
+  alias: "EUC: Nightly charge start"
+  use_blueprint:
+    path: euc_charging/scheduled_charge.yaml
+    input:
+      charger_switch: switch.euc_charger_socket
+      start_time: "00:15:00"
+      full_charge_boolean: input_boolean.euc_full_charge
+      request_full_charge: false
+
+- id: euc_bp_ride_day_charge
+  alias: "EUC: Ride day full charge"
+  use_blueprint:
+    path: euc_charging/scheduled_charge.yaml
+    input:
+      charger_switch: switch.euc_charger_socket
+      start_time: "08:00:00"
+      weekdays: [sun, wed, fri]
+      full_charge_boolean: input_boolean.euc_full_charge
+      request_full_charge: true
+
+- id: euc_bp_charge_limit
+  alias: "EUC: Stop charging at 95%"
+  use_blueprint:
+    path: euc_charging/charge_limit.yaml
+    input:
+      battery_sensor: sensor.euc_battery
+      charger_switch: switch.euc_charger_socket
+      limit: 95
+      hold_minutes: 5
+      override_booleans:
+        - input_boolean.euc_full_charge
+        - input_boolean.euc_extended_balance_charge
+
+- id: euc_bp_charge_complete
+  alias: "EUC: Charge complete"
+  use_blueprint:
+    path: euc_charging/charge_complete.yaml
+    input:
+      charging_sensor: binary_sensor.euc_charging
+      settle_minutes: 45
+      charger_switch: switch.euc_charger_socket
+      full_charge_boolean: input_boolean.euc_full_charge
+      balance_boolean: input_boolean.euc_extended_balance_charge
+      completion_actions:
+        - action: notify.notify
+          data:
+            message: EUC charging complete - charger turned off.
+
+- id: euc_bp_balance_charge
+  alias: "EUC: Extended balance charge"
+  use_blueprint:
+    path: euc_charging/balance_charge.yaml
+    input:
+      battery_sensor: sensor.euc_battery
+      charger_switch: switch.euc_charger_socket
+      full_charge_boolean: input_boolean.euc_full_charge
+      balance_boolean: input_boolean.euc_extended_balance_charge
+      balance_timer: timer.euc_balance_charge
+      hold_hours: 8
+      full_charge_counter: counter.euc_full_charges_since_balance
+      last_balance_date: input_datetime.euc_last_balance_charge
+      charges_between: 20
+      days_between: 30
+      enabled_actions:
+        - action: notify.notify
+          data:
+            message: EUC extended balance charge enabled.
+      completion_actions:
+        - action: notify.notify
+          data:
+            message: EUC balance charge complete - charger turned off.
+
+- id: euc_bp_idle_off
+  alias: "EUC: Charger off when wheel isn't charging"
+  use_blueprint:
+    path: euc_charging/charger_idle_off.yaml
+    input:
+      charger_switch: switch.euc_charger_socket
+      charging_sensor: binary_sensor.euc_charging
+      delay_minutes: 5
+      skip_booleans:
+        - input_boolean.euc_extended_balance_charge
+      skip_timers:
+        - timer.euc_balance_charge
+      notify_actions:
+        - action: notify.notify
+          data:
+            message: EUC charger turned off - the wheel isn't charging.
+
+- id: euc_bp_ride_ready
+  alias: "EUC: Ride day readiness check"
+  use_blueprint:
+    path: euc_charging/ride_ready_check.yaml
+    input:
+      battery_sensor: sensor.euc_last_battery
+      charger_switch: switch.euc_charger_socket
+      weekdays: [sun, wed, fri]
+      ride_time_text: 5pm
+      notify_actions:
+        - action: notify.notify
+          data:
+            title: EUC not ready for ride
+            message: "{{ message }}"
+
+# Optional Zigbee button (HOBEIAN ZG-101ZL) with the community ZHA blueprint
+# https://community.home-assistant.io/t/zha-1-button-scene-switch-hobeian-zg-101zl/920080
+# short press toggles the charger, long press toggles the full charge request.
+- id: euc_bp_charger_button
+  alias: "EUC: Charger button"
+  use_blueprint:
+    path: ShogunMan/zha-1-button-scene-switch-hobeian-zg-101zl.yaml
+    input:
+      1button_scene_switch: <your ZG-101ZL ZHA device id>
+      button_one_short_press:
+        - action: switch.toggle
+          target:
+            entity_id: switch.euc_charger_socket
+      button_one_long_press:
+        - action: input_boolean.toggle
+          target:
+            entity_id: input_boolean.euc_full_charge

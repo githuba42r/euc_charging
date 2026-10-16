@@ -1,0 +1,121 @@
+blueprint:
+  name: EUC - Ride day readiness check
+  description: >
+    On ride days, every 30 minutes within a time window, warn if the wheel is
+    below the "ready" level and the charger is off, or (after an at-risk time)
+    still below a level from which it can't reach full charge before the ride.
+
+    Use the EUC Charging Monitor "Last Battery" sensor (enable it in the entity
+    settings - it keeps the last known value when the wheel disconnects). Only
+    readings updated today are trusted. In your notification actions you can
+    use {{ battery }} and {{ message }}.
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/ride_ready_check.yaml
+  input:
+    battery_sensor:
+      name: Wheel last-known battery sensor
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    charger_switch:
+      name: Charger smart plug
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    weekdays:
+      name: Ride days
+      default: [sun, wed, fri]
+      selector:
+        select:
+          multiple: true
+          mode: list
+          options:
+            - { label: Monday, value: mon }
+            - { label: Tuesday, value: tue }
+            - { label: Wednesday, value: wed }
+            - { label: Thursday, value: thu }
+            - { label: Friday, value: fri }
+            - { label: Saturday, value: sat }
+            - { label: Sunday, value: sun }
+    window_start:
+      name: Start checking at
+      default: "08:15:00"
+      selector:
+        time: {}
+    window_end:
+      name: Stop checking at
+      default: "16:01:00"
+      selector:
+        time: {}
+    ready_level:
+      name: Ready level
+      description: Warn if below this and the charger is off.
+      default: 90
+      selector:
+        number:
+          min: 10
+          max: 100
+          unit_of_measurement: "%"
+    at_risk_level:
+      name: At-risk level
+      description: After the at-risk time, warn if below this even while charging.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    at_risk_after:
+      name: At-risk time
+      default: "15:00:00"
+      selector:
+        time: {}
+    ride_time_text:
+      name: Ride time (for messages)
+      default: 5pm
+      selector:
+        text: {}
+    notify_actions:
+      name: Notification actions
+      description: Use {{ message }} and {{ battery }} in your actions.
+      selector:
+        action: {}
+
+mode: single
+
+variables:
+  battery_entity: !input battery_sensor
+  charger: !input charger_switch
+  ready_level: !input ready_level
+  at_risk_level: !input at_risk_level
+  at_risk_after: !input at_risk_after
+  ride_time_text: !input ride_time_text
+  battery: "{{ states(battery_entity) }}"
+  battery_num: "{{ states(battery_entity) | float(-1) }}"
+  updated_today: >
+    {{ states[battery_entity] is not none
+       and states[battery_entity].last_updated.date() == now().date() }}
+  past_at_risk: "{{ now().strftime('%H:%M:%S') >= at_risk_after }}"
+  at_risk: "{{ updated_today and battery_num >= 0 and battery_num < at_risk_level | float }}"
+  needs_charge: >
+    {{ updated_today and battery_num >= 0 and battery_num < ready_level | float
+       and not is_state(charger, 'on') }}
+  message: >
+    {% if past_at_risk and at_risk %}Wheel is only at {{ battery }}% - unlikely to reach full charge before the {{ ride_time_text }} ride.
+    {%- else %}Wheel is at {{ battery }}% and not charging - ride is at {{ ride_time_text }}.{% endif %}
+
+triggers:
+  - trigger: time_pattern
+    minutes: /30
+
+conditions:
+  - condition: time
+    weekday: !input weekdays
+    after: !input window_start
+    before: !input window_end
+  - condition: template
+    value_template: "{{ needs_charge or (past_at_risk and at_risk) }}"
+
+actions: !input notify_actions

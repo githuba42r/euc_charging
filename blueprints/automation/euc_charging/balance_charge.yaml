@@ -1,0 +1,246 @@
+blueprint:
+  name: EUC - Extended balance charge
+  description: >
+    Periodically lets the pack sit at 100% for several hours so the BMS can
+    balance the cells. Balance mode turns on automatically after a number of
+    full charges or days since the last balance. Once the wheel reaches 100%
+    in balance mode a timer holds the charge; when it finishes the charger is
+    turned off, the counter reset and today's date recorded.
+
+    Also counts completed full charges (battery above 99% while the full charge
+    boolean is on) and clears the full charge request.
+
+    Create the helpers first: input_boolean (full charge, balance mode),
+    timer (balance hold), counter (full charges since balance), input_datetime
+    with date (last balance charge).
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/balance_charge.yaml
+  input:
+    battery_sensor:
+      name: Wheel battery sensor
+      description: The EUC Charging Monitor "Battery" sensor (live, %).
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: battery
+    charger_switch:
+      name: Charger smart plug
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    full_charge_boolean:
+      name: Full charge boolean
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    balance_boolean:
+      name: Extended balance charge boolean
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    balance_timer:
+      name: Balance hold timer
+      selector:
+        entity:
+          filter:
+            - domain: timer
+    hold_hours:
+      name: Hours to hold at 100%
+      default: 8
+      selector:
+        number:
+          min: 1
+          max: 24
+          unit_of_measurement: h
+    full_charge_counter:
+      name: Full charges since last balance (counter)
+      selector:
+        entity:
+          filter:
+            - domain: counter
+    last_balance_date:
+      name: Last balance charge (input_datetime, date)
+      selector:
+        entity:
+          filter:
+            - domain: input_datetime
+    charges_between:
+      name: Full charges between balance charges
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+    days_between:
+      name: Days between balance charges
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+    check_time:
+      name: Daily check time
+      default: "07:00:00"
+      selector:
+        time: {}
+    enabled_actions:
+      name: Actions when balance mode auto-enables
+      default: []
+      selector:
+        action: {}
+    completion_actions:
+      name: Actions when the balance charge completes
+      default: []
+      selector:
+        action: {}
+
+mode: queued
+
+variables:
+  full_charge_counter: !input full_charge_counter
+  last_balance_date: !input last_balance_date
+  charges_between: !input charges_between
+  days_between: !input days_between
+  hold_hours: !input hold_hours
+
+triggers:
+  - trigger: numeric_state
+    id: full_reached
+    entity_id: !input battery_sensor
+    above: 99
+    for:
+      minutes: 15
+  - trigger: numeric_state
+    id: balance_at_100
+    entity_id: !input battery_sensor
+    above: 99
+    for:
+      minutes: 5
+  - trigger: event
+    id: hold_finished
+    event_type: timer.finished
+    event_data:
+      entity_id: !input balance_timer
+  - trigger: state
+    id: check_due
+    entity_id: !input full_charge_counter
+  - trigger: time
+    id: check_due
+    at: !input check_time
+  - trigger: state
+    id: balance_cancelled
+    entity_id: !input balance_boolean
+    from: "on"
+    to: "off"
+
+actions:
+  - choose:
+      # A normal full charge completed: count it and clear the request.
+      - conditions:
+          - condition: trigger
+            id: full_reached
+          - condition: state
+            entity_id: !input full_charge_boolean
+            state: "on"
+          - condition: state
+            entity_id: !input balance_boolean
+            state: "off"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input full_charge_boolean
+          - action: counter.increment
+            target:
+              entity_id: !input full_charge_counter
+
+      # Balance mode reached 100%: start the hold timer.
+      - conditions:
+          - condition: trigger
+            id: balance_at_100
+          - condition: state
+            entity_id: !input balance_boolean
+            state: "on"
+          - condition: state
+            entity_id: !input balance_timer
+            state: idle
+          - condition: state
+            entity_id: !input charger_switch
+            state: "on"
+        sequence:
+          - action: timer.start
+            target:
+              entity_id: !input balance_timer
+            data:
+              duration: "{{ '%02d:00:00' | format(hold_hours | int) }}"
+
+      # Hold finished: stop charging, clear modes, record the balance.
+      - conditions:
+          - condition: trigger
+            id: hold_finished
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - !input balance_boolean
+                - !input full_charge_boolean
+          - action: counter.reset
+            target:
+              entity_id: !input full_charge_counter
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input last_balance_date
+            data:
+              date: "{{ now().strftime('%Y-%m-%d') }}"
+          - choose: []
+            default: !input completion_actions
+
+      # Enough full charges or days since the last balance: enable balance mode.
+      - conditions:
+          - condition: trigger
+            id: check_due
+          - condition: state
+            entity_id: !input balance_boolean
+            state: "off"
+          - condition: template
+            value_template: >
+              {% set last = states(last_balance_date) %}
+              {{ states(full_charge_counter) | int(0) >= charges_between | int
+                 or last in ['unknown', 'unavailable', '']
+                 or (now().date() - as_datetime(last).date()).days >= days_between | int }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input balance_boolean
+          - choose: []
+            default: !input enabled_actions
+
+      # Balance mode switched off by hand: cancel the hold and record it so it
+      # isn't immediately re-enabled.
+      - conditions:
+          - condition: trigger
+            id: balance_cancelled
+        sequence:
+          - if:
+              - condition: state
+                entity_id: !input balance_timer
+                state: active
+            then:
+              - action: timer.cancel
+                target:
+                  entity_id: !input balance_timer
+          - action: counter.reset
+            target:
+              entity_id: !input full_charge_counter
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: !input last_balance_date
+            data:
+              date: "{{ now().strftime('%Y-%m-%d') }}"

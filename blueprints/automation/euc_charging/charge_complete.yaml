@@ -1,0 +1,78 @@
+blueprint:
+  name: EUC - Charge complete
+  description: >
+    When the wheel stops charging and stays that way for a while (the charger
+    has finished, including its trickle/top-off phase), turn the smart plug off,
+    clear the "full charge" request and run your own announcement actions.
+    Skipped while an extended balance charge is running.
+  domain: automation
+  source_url: https://github.com/githuba42r/euc_charging/blob/master/blueprints/automation/euc_charging/charge_complete.yaml
+  input:
+    charging_sensor:
+      name: Wheel charging sensor
+      description: The EUC Charging Monitor "Charging" binary sensor.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+    settle_minutes:
+      name: Minutes not charging before declaring complete
+      default: 45
+      selector:
+        number:
+          min: 1
+          max: 180
+          unit_of_measurement: min
+    charger_switch:
+      name: Charger smart plug
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    full_charge_boolean:
+      name: Full charge boolean
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    balance_boolean:
+      name: Extended balance charge boolean
+      description: While this is on the balance-charge automation owns the charger.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    completion_actions:
+      name: Completion actions
+      description: Optional - e.g. a phone notification or a TTS announcement.
+      default: []
+      selector:
+        action: {}
+
+mode: single
+
+triggers:
+  - trigger: state
+    entity_id: !input charging_sensor
+    from: "on"
+    to: "off"
+    for:
+      minutes: !input settle_minutes
+
+conditions:
+  - condition: state
+    entity_id: !input charger_switch
+    state: "on"
+  - condition: state
+    entity_id: !input balance_boolean
+    state: "off"
+
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: !input charger_switch
+  - action: input_boolean.turn_off
+    target:
+      entity_id: !input full_charge_boolean
+  - choose: []
+    default: !input completion_actions

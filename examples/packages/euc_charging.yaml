@@ -1,0 +1,443 @@
+# EUC charging package - helpers + automations for a smart-plug charging setup.
+#
+# A complete, working example of the charging strategy described in
+# docs/charging-automations.md:
+#   * nightly top-up capped at 95% (Li-ion longevity)
+#   * ride days charge to 100%, with a readiness check before the ride
+#   * an extended balance charge (8 h at 100%) every 20 full charges or 30 days
+#   * safety: charger off when the wheel isn't charging
+#   * pause charging while you're away, resume when you're back
+#
+# Install:
+#   1. Enable packages in configuration.yaml:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   2. Copy this file to <config>/packages/euc_charging.yaml
+#   3. Replace the placeholder entity IDs below with your own (search/replace):
+#        switch.euc_charger_socket          -> your charger smart plug
+#        sensor.euc_battery                 -> EUC Charging Monitor "Battery" sensor
+#        sensor.euc_last_battery            -> EUC Charging Monitor "Last Battery" sensor (enable it)
+#        binary_sensor.euc_charging         -> EUC Charging Monitor "Charging" binary sensor
+#        person.rider                       -> you
+#        notify.notify                      -> your phone notifier (e.g. notify.mobile_app_<phone>)
+#   4. Check configuration and restart Home Assistant.
+#
+# Prefer the UI? The same behaviour is available as blueprints in
+# blueprints/automation/euc_charging/ (see examples/blueprint_usage/).
+
+input_boolean:
+  euc_full_charge:
+    name: EUC full charge
+    icon: mdi:battery-charging-100
+  euc_extended_balance_charge:
+    name: EUC extended balance charge
+    icon: mdi:scale-balance
+  euc_paused_for_away:
+    name: EUC charging paused (away)
+  euc_resume_full_charge:
+    name: EUC resume full charge
+  euc_resume_balance_charge:
+    name: EUC resume balance charge
+
+timer:
+  euc_balance_charge:
+    name: EUC balance charge hold
+    duration: "08:00:00"
+    restore: true
+
+counter:
+  euc_full_charges_since_balance:
+    name: EUC full charges since balance
+    icon: mdi:counter
+    restore: true
+
+input_datetime:
+  euc_last_balance_charge:
+    name: EUC last balance charge
+    has_date: true
+    has_time: false
+
+automation:
+  # --- Charging schedule -----------------------------------------------------
+
+  - id: euc_nightly_charge_start
+    alias: "EUC: Nightly charge start"
+    description: Top the wheel up overnight; the 95% limit below stops it.
+    triggers:
+      - trigger: time
+        at: "00:15:00"
+    actions:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.euc_charger_socket
+    mode: single
+
+  - id: euc_ride_day_full_charge
+    alias: "EUC: Ride day full charge"
+    description: On ride days request a full (100%) charge and start the charger.
+    triggers:
+      - trigger: time
+        at: "08:00:00"
+    conditions:
+      - condition: time
+        weekday: [sun, wed, fri]
+    actions:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.euc_full_charge
+      - action: switch.turn_on
+        target:
+          entity_id: switch.euc_charger_socket
+    mode: single
+
+  - id: euc_stop_at_95
+    alias: "EUC: Stop charging at 95%"
+    description: Daily charges stop at 95% unless a full or balance charge is requested.
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.euc_battery
+        above: 95
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_full_charge
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "off"
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.euc_charger_socket
+    mode: single
+
+  - id: euc_charge_complete
+    alias: "EUC: Charge complete"
+    description: The wheel stopped charging for 45 min - charger finished. Turn the plug off.
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.euc_charging
+        from: "on"
+        to: "off"
+        for:
+          minutes: 45
+    conditions:
+      - condition: state
+        entity_id: switch.euc_charger_socket
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "off"
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.euc_charger_socket
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.euc_full_charge
+      - action: notify.notify
+        data:
+          message: EUC charging complete - charger turned off.
+    mode: single
+
+  - id: euc_full_charge_counted
+    alias: "EUC: Count full charge"
+    description: A requested full charge reached 100% - clear the request and count it.
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.euc_battery
+        above: 99
+        for:
+          minutes: 15
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_full_charge
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "off"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.euc_full_charge
+      - action: counter.increment
+        target:
+          entity_id: counter.euc_full_charges_since_balance
+    mode: single
+
+  # --- Ride day readiness ----------------------------------------------------
+
+  - id: euc_ride_ready_check
+    alias: "EUC: Ride day readiness check"
+    description: >
+      Every 30 min on ride days (08:15-16:00) warn if the wheel is below 90% and
+      not charging, or below 60% after 15:00 (can't reach full before the 5pm ride).
+      Uses the integration's Last Battery sensor and only trusts today's readings.
+    triggers:
+      - trigger: time_pattern
+        minutes: /30
+    variables:
+      battery: "{{ states('sensor.euc_last_battery') }}"
+      battery_num: "{{ states('sensor.euc_last_battery') | float(-1) }}"
+      updated_today: >
+        {{ states.sensor.euc_last_battery is not none and
+           states.sensor.euc_last_battery.last_updated.date() == now().date() }}
+      at_risk: "{{ updated_today and battery_num >= 0 and battery_num < 60 }}"
+      needs_charge: "{{ updated_today and battery_num >= 0 and battery_num < 90 }}"
+    conditions:
+      - condition: time
+        weekday: [sun, wed, fri]
+        after: "08:15:00"
+        before: "16:01:00"
+      - condition: or
+        conditions:
+          - condition: and
+            conditions:
+              - condition: template
+                value_template: "{{ needs_charge }}"
+              - condition: state
+                entity_id: switch.euc_charger_socket
+                state: "off"
+          - condition: and
+            conditions:
+              - condition: time
+                after: "15:00:00"
+              - condition: template
+                value_template: "{{ at_risk }}"
+    actions:
+      - action: notify.notify
+        data:
+          title: EUC not ready for ride
+          message: >
+            {% if now().hour >= 15 and at_risk %}Wheel is only at {{ battery }}% - unlikely to reach full charge before the 5pm ride.
+            {%- else %}Wheel is at {{ battery }}% and not charging - ride is at 5pm.{% endif %}
+    mode: single
+
+  # --- Extended balance charge -----------------------------------------------
+
+  - id: euc_balance_auto_enable
+    alias: "EUC: Auto-enable balance charge"
+    description: Turn balance mode on after 20 full charges or 30 days since the last balance.
+    triggers:
+      - trigger: state
+        entity_id: counter.euc_full_charges_since_balance
+      - trigger: time
+        at: "07:00:00"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "off"
+      - condition: template
+        value_template: >
+          {% set last = states('input_datetime.euc_last_balance_charge') %}
+          {{ states('counter.euc_full_charges_since_balance') | int(0) >= 20
+             or last in ['unknown', 'unavailable', '']
+             or (now().date() - as_datetime(last).date()).days >= 30 }}
+    actions:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.euc_extended_balance_charge
+      - action: notify.notify
+        data:
+          message: EUC extended balance charge enabled - the next charge will hold at 100% for 8 hours.
+    mode: single
+
+  - id: euc_balance_start_hold
+    alias: "EUC: Start balance hold at 100%"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.euc_battery
+        above: 99
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "on"
+      - condition: state
+        entity_id: timer.euc_balance_charge
+        state: idle
+      - condition: state
+        entity_id: switch.euc_charger_socket
+        state: "on"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.euc_balance_charge
+    mode: single
+
+  - id: euc_balance_complete
+    alias: "EUC: Balance charge complete"
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.euc_balance_charge
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.euc_charger_socket
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.euc_extended_balance_charge
+            - input_boolean.euc_full_charge
+      - action: counter.reset
+        target:
+          entity_id: counter.euc_full_charges_since_balance
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.euc_last_balance_charge
+        data:
+          date: "{{ now().strftime('%Y-%m-%d') }}"
+      - action: notify.notify
+        data:
+          message: EUC balance charge complete - charger turned off.
+    mode: single
+
+  - id: euc_balance_cancelled
+    alias: "EUC: Balance charge cancelled"
+    description: Balance mode turned off by hand - cancel the hold and record the date.
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        from: "on"
+        to: "off"
+    actions:
+      - if:
+          - condition: state
+            entity_id: timer.euc_balance_charge
+            state: active
+        then:
+          - action: timer.cancel
+            target:
+              entity_id: timer.euc_balance_charge
+      - action: counter.reset
+        target:
+          entity_id: counter.euc_full_charges_since_balance
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.euc_last_balance_charge
+        data:
+          date: "{{ now().strftime('%Y-%m-%d') }}"
+    mode: single
+
+  - id: euc_balance_charger_off
+    alias: "EUC: End balance when charger switched off"
+    description: Charger turned off during balance mode (not an away pause) - end balance mode.
+    triggers:
+      - trigger: state
+        entity_id: switch.euc_charger_socket
+        to: "off"
+        for:
+          seconds: 5
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.euc_paused_for_away
+        state: "off"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.euc_extended_balance_charge
+            - input_boolean.euc_full_charge
+    mode: single
+
+  # --- Safety ----------------------------------------------------------------
+
+  - id: euc_charger_idle_off
+    alias: "EUC: Charger off when wheel isn't charging"
+    description: >
+      Plug on for 5 min but the wheel isn't charging (not connected or already full).
+      Skipped during a balance charge.
+    triggers:
+      - trigger: state
+        entity_id: switch.euc_charger_socket
+        to: "on"
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.euc_charging
+        state: "off"
+      - condition: state
+        entity_id: input_boolean.euc_extended_balance_charge
+        state: "off"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: timer.euc_balance_charge
+            state: active
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.euc_charger_socket
+      - action: notify.notify
+        data:
+          message: EUC charger turned off - the wheel isn't charging (not connected or already full).
+    mode: single
+
+  # --- Away pause / resume ---------------------------------------------------
+
+  - id: euc_pause_when_away
+    alias: "EUC: Pause charging when away"
+    description: Don't leave the charger running unattended - remember the mode and switch off.
+    triggers:
+      - trigger: state
+        entity_id: person.rider
+        to: not_home
+        for:
+          minutes: 5
+    conditions:
+      - condition: state
+        entity_id: switch.euc_charger_socket
+        state: "on"
+    actions:
+      - action: >-
+          input_boolean.turn_{{ 'on' if is_state('input_boolean.euc_full_charge', 'on') else 'off' }}
+        target:
+          entity_id: input_boolean.euc_resume_full_charge
+      - action: >-
+          input_boolean.turn_{{ 'on' if is_state('input_boolean.euc_extended_balance_charge', 'on') else 'off' }}
+        target:
+          entity_id: input_boolean.euc_resume_balance_charge
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.euc_paused_for_away
+      - action: switch.turn_off
+        target:
+          entity_id: switch.euc_charger_socket
+    mode: single
+
+  - id: euc_resume_when_home
+    alias: "EUC: Resume charging when home"
+    triggers:
+      - trigger: state
+        entity_id: person.rider
+        to: home
+        for:
+          minutes: 15
+    conditions:
+      - condition: state
+        entity_id: input_boolean.euc_paused_for_away
+        state: "on"
+    actions:
+      - action: >-
+          input_boolean.turn_{{ 'on' if is_state('input_boolean.euc_resume_full_charge', 'on') else 'off' }}
+        target:
+          entity_id: input_boolean.euc_full_charge
+      - action: >-
+          input_boolean.turn_{{ 'on' if is_state('input_boolean.euc_resume_balance_charge', 'on') else 'off' }}
+        target:
+          entity_id: input_boolean.euc_extended_balance_charge
+      - action: switch.turn_on
+        target:
+          entity_id: switch.euc_charger_socket
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.euc_paused_for_away
+    mode: single
