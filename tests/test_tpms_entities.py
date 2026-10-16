@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
+from homeassistant.components import bluetooth  # noqa: E402
 from homeassistant.const import CONF_ADDRESS  # noqa: E402
 
 from euc_charging import tpms_entities  # noqa: E402
@@ -31,7 +32,10 @@ README_PAYLOAD = bytes.fromhex("b0490136")
 
 
 def advert(payload: bytes, rssi: int = -70):
-    return SimpleNamespace(address=ADDRESS, rssi=rssi, manufacturer_data={0x3000: payload})
+    return SimpleNamespace(
+        address=ADDRESS, rssi=rssi, manufacturer_data={0x3000: payload},
+        time=bluetooth.MONOTONIC_TIME(),
+    )
 
 
 def make_entry(title: str = "Front Wheel TPMS", options: dict | None = None) -> SimpleNamespace:
@@ -84,7 +88,7 @@ def test_sensor_value_fns_return_none_without_a_reading():
 
 def test_sensor_value_fns_after_advertisement():
     coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
-    coordinator.handle_advertisement(advert(README_PAYLOAD), None)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
 
     values = {d.key: d.value_fn(coordinator) for d in TPMS_SENSORS}
 
@@ -99,7 +103,7 @@ def test_sensor_value_fns_after_advertisement():
 
 def test_low_pressure_alarm_false_when_above_threshold():
     coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
-    coordinator.handle_advertisement(advert(README_PAYLOAD), None)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
     entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 30})
 
     low_pressure, low_battery = build_tpms_alarms(coordinator, entry)
@@ -112,7 +116,7 @@ def test_low_pressure_alarm_false_when_above_threshold():
 
 def test_low_pressure_alarm_true_when_below_threshold():
     coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
-    coordinator.handle_advertisement(advert(README_PAYLOAD), None)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
     entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 31})
 
     low_pressure, _low_battery = build_tpms_alarms(coordinator, entry)
@@ -123,7 +127,7 @@ def test_low_pressure_alarm_true_when_below_threshold():
 
 def test_low_battery_alarm_false_for_98_percent():
     coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
-    coordinator.handle_advertisement(advert(README_PAYLOAD), None)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
     entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 30})
 
     _low_pressure, low_battery = build_tpms_alarms(coordinator, entry)

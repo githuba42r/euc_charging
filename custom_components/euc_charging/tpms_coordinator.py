@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
@@ -34,15 +34,21 @@ class TpmsCoordinator:
 
     @callback
     def async_start(self) -> None:
-        """Subscribe to this sensor's advertisements."""
-        self._unsub_advert = bluetooth.async_register_callback(
-            self.hass,
-            self.handle_advertisement,
-            bluetooth.BluetoothCallbackMatcher(
-                address=self.address, manufacturer_id=TPMS_MANUFACTURER_ID
-            ),
-            bluetooth.BluetoothScanningMode.PASSIVE,
+        """Subscribe to this sensor's advertisements.
+
+        async_register_advertisement_callback fires for every advert from the
+        address, connectable or not and even when the data is unchanged, so
+        Last Seen and RSSI stay current. (async_register_callback without
+        ``connectable`` in its matcher only sees connectable adverts, which
+        these sensors never send.) The last advert already heard is replayed
+        first so entities have a value straight after setup.
+        """
+        self._unsub_advert = bluetooth.async_register_advertisement_callback(
+            self.hass, self.handle_advertisement, self.address
         )
+        last = bluetooth.async_last_service_info(self.hass, self.address, connectable=False)
+        if last is not None:
+            self.handle_advertisement(last)
 
     async def async_shutdown(self) -> None:
         """Stop listening for advertisements."""
@@ -62,14 +68,19 @@ class TpmsCoordinator:
         return remove
 
     @callback
-    def handle_advertisement(self, service_info, change) -> None:
-        """Decode an advertisement and notify listeners."""
+    def handle_advertisement(self, service_info) -> None:
+        """Decode an advertisement and notify listeners.
+
+        ``last_seen`` comes from the advert's own monotonic receive time, so a
+        replayed (older) advert is not stamped as just received.
+        """
         payload = service_info.manufacturer_data.get(TPMS_MANUFACTURER_ID)
         reading = decode_tpms(payload, service_info.rssi) if payload else None
         if reading is None:
             _LOGGER.debug("Ignoring TPMS advert from %s: %s", self.address, payload)
             return
         self.reading = reading
-        self.last_seen = dt_util.utcnow()
+        age = max(0.0, bluetooth.MONOTONIC_TIME() - service_info.time)
+        self.last_seen = dt_util.utcnow() - timedelta(seconds=age)
         for update_callback in list(self._listeners):
             update_callback()
