@@ -45,6 +45,11 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _known(value: Any, fallback: Any) -> Any:
+    """Return value unless the protocol couldn't provide it (None)."""
+    return fallback if value is None else value
+
+
 class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Class to manage fetching EUC data."""
 
@@ -143,9 +148,11 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._write_uuid = None
             self._requires_keepalive = False
         elif brand in (WheelBrand.GOTWAY, WheelBrand.BEGODE):
+            # Gotway streams unprompted; the writes are the one-off "N"/"V"
+            # name/firmware probe used to pick the wheel model (same characteristic).
             self._read_uuid = GOTWAY_READ_UUID
-            self._write_uuid = None
-            self._requires_keepalive = False
+            self._write_uuid = GOTWAY_READ_UUID
+            self._requires_keepalive = True
         elif brand in (WheelBrand.VETERAN, WheelBrand.LEAPERKIM):
             self._read_uuid = VETERAN_READ_UUID
             self._write_uuid = None
@@ -173,7 +180,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._requires_keepalive = False
 
     async def _keepalive_loop(self) -> None:
-        """Send keepalive messages for brands that require them."""
+        """Write the decoder's requests (keepalives, handshakes, register polls)."""
         if not self._requires_keepalive or not self._write_uuid:
             return
         
@@ -183,18 +190,18 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await asyncio.sleep(1)
                     continue
                 
-                # Send keepalive based on decoder brand
+                # The decoder decides what to send and when (static keepalive,
+                # Gotway name probe, Ninebot request/response state machine).
+                interval = 1.0
                 if self.decoder:
-                    keepalive_data = self.decoder.get_keepalive_packet()
-                    if keepalive_data and self._write_uuid:
-                        await self.client.write_gatt_char(self._write_uuid, keepalive_data, response=False)
-                        _LOGGER.debug("Sent keepalive packet")
+                    interval = self.decoder.request_interval
+                    for packet in self.decoder.get_requests():
+                        if not self._write_uuid:
+                            break
+                        await self.client.write_gatt_char(self._write_uuid, packet, response=False)
+                        _LOGGER.debug("Sent request %s", packet.hex())
                 
-                # Keep-alive interval (25ms for InMotion, 1s for others)
-                if self.decoder and self.decoder.brand in (WheelBrand.INMOTION, WheelBrand.INMOTION_V2):
-                    await asyncio.sleep(0.025)  # 25ms
-                else:
-                    await asyncio.sleep(1.0)  # 1 second
+                await asyncio.sleep(interval)
                     
             except (BleakError, asyncio.TimeoutError) as ex:
                 _LOGGER.warning("Keepalive failed: %s", ex)
@@ -273,13 +280,13 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if self.data:
                             _LOGGER.debug(
                                 "Saving last known values on manual disconnect: battery=%.1f%%, voltage=%.2fV",
-                                self.data.get("battery_percent", 0),
-                                self.data.get("voltage", 0)
+                                self.data.get("battery_percent") or 0,
+                                self.data.get("voltage") or 0
                             )
-                            self.last_voltage = self.data.get("voltage", self.last_voltage)
-                            self.last_battery_percent = self.data.get("battery_percent", self.last_battery_percent)
-                            self.last_trip_distance = self.data.get("trip_distance", self.last_trip_distance)
-                            self.last_total_distance = self.data.get("total_distance", self.last_total_distance)
+                            self.last_voltage = _known(self.data.get("voltage"), self.last_voltage)
+                            self.last_battery_percent = _known(self.data.get("battery_percent"), self.last_battery_percent)
+                            self.last_trip_distance = _known(self.data.get("trip_distance"), self.last_trip_distance)
+                            self.last_total_distance = _known(self.data.get("total_distance"), self.last_total_distance)
                             self.last_connected_time = dt_util.now()
                             self._schedule_save()
 
@@ -363,17 +370,16 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.client.connect()
                 _LOGGER.info("Successfully connected to %s (%s)", self.ble_device.address, self.ble_device.name)
 
+                if self.decoder:
+                    self.decoder.reset_session()
+
                 # Start notifications on the read characteristic
                 # We'll use NOTIFY_UUID as default, and switch once protocol is detected
                 read_uuid = self._read_uuid or NOTIFY_UUID
                 await self.client.start_notify(read_uuid, self._notification_handler)
                 
                 # Start keepalive task if required
-                if self._requires_keepalive:
-                    self._keepalive_task = self.hass.async_create_background_task(
-                        self._keepalive_loop(), name="euc_keepalive_loop"
-                    )
-                    _LOGGER.info("Started keepalive task for bidirectional protocol")
+                self._ensure_keepalive_task()
                 
                 # Clear the device available event after successful connection
                 self._device_available.clear()
@@ -399,6 +405,18 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await asyncio.sleep(10)
 
     @callback
+    def _ensure_keepalive_task(self) -> None:
+        """Start the request loop if this protocol writes and it isn't running."""
+        if not self._requires_keepalive:
+            return
+        if self._keepalive_task and not self._keepalive_task.done():
+            return
+        self._keepalive_task = self.hass.async_create_background_task(
+            self._keepalive_loop(), name="euc_keepalive_loop"
+        )
+        _LOGGER.info("Started request task for bidirectional protocol")
+
+    @callback
     def _disconnected_callback(self, client: BleakClient) -> None:
         """Handle disconnection."""
         _LOGGER.info("Disconnected from %s", client.address)
@@ -408,14 +426,14 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.data:
             _LOGGER.debug(
                 "Saving last known values on disconnect: battery=%.1f%%, voltage=%.2fV, total_distance=%.2fkm",
-                self.data.get("battery_percent", 0),
-                self.data.get("voltage", 0),
-                self.data.get("total_distance", 0)
+                self.data.get("battery_percent") or 0,
+                self.data.get("voltage") or 0,
+                self.data.get("total_distance") or 0
             )
-            self.last_voltage = self.data.get("voltage", self.last_voltage)
-            self.last_battery_percent = self.data.get("battery_percent", self.last_battery_percent)
-            self.last_trip_distance = self.data.get("trip_distance", self.last_trip_distance)
-            self.last_total_distance = self.data.get("total_distance", self.last_total_distance)
+            self.last_voltage = _known(self.data.get("voltage"), self.last_voltage)
+            self.last_battery_percent = _known(self.data.get("battery_percent"), self.last_battery_percent)
+            self.last_trip_distance = _known(self.data.get("trip_distance"), self.last_trip_distance)
+            self.last_total_distance = _known(self.data.get("total_distance"), self.last_total_distance)
         else:
             _LOGGER.warning(
                 "No data available on disconnect, keeping existing last known values: "
@@ -455,6 +473,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.info("Protocol detected: %s (brand: %s)", self.decoder.name, self.decoder.brand)
                     # Setup UUIDs for this brand
                     self._setup_uuids_for_brand(self.decoder.brand)
+                    self._ensure_keepalive_task()
                 else:
                     # Buffer is too short or unknown header
                     return
@@ -475,11 +494,14 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.last_total_distance = total
                 self._schedule_save()
 
-                # Add charge estimates with voltage data
+                # Add charge estimates with voltage data. Some protocols can't
+                # report battery percent or charging state (None); don't feed
+                # unknowns into the tracker.
+                battery_percent = telemetry.get("battery_percent")
                 estimates = self.charge_tracker.update(
-                    telemetry.get("battery_percent", 0),
-                    telemetry.get("is_charging", False),
-                    telemetry.get("voltage", 0)
+                    battery_percent if battery_percent is not None else 0,
+                    bool(telemetry.get("is_charging")) and battery_percent is not None,
+                    telemetry.get("voltage") or 0,
                 )
                 telemetry["charge_estimates"] = estimates
                 

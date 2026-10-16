@@ -11,13 +11,16 @@ Supports automatic protocol detection for all major EUC brands:
 from __future__ import annotations
 
 import logging
+import re
 import struct
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
 from .const import CELL_CONFIG, WheelBrand
+from .gotway_models import GOTWAY_MODELS, GotwayModel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,10 +74,30 @@ class EucDecoder(ABC):
 
     def get_keepalive_packet(self) -> Optional[bytes]:
         """Return keepalive packet for bidirectional protocols (InMotion, Ninebot).
-        
+
         Returns None for passive protocols (KingSong, Gotway, Veteran).
         """
         return None
+
+    # Seconds between the coordinator's calls to get_requests() while connected.
+    request_interval: float = 1.0
+
+    def reset_session(self) -> None:
+        """Forget per-connection protocol state; called on every (re)connect.
+
+        Protocols with a handshake (Ninebot key exchange, Gotway name probe)
+        restart it here. Passive protocols need nothing.
+        """
+
+    def get_requests(self) -> list[bytes]:
+        """Return the packets to write to the wheel now (possibly none).
+
+        The coordinator calls this every ``request_interval`` seconds. Protocols
+        driven by a request/response state machine override it; the default
+        sends the static keepalive packet, if the protocol has one.
+        """
+        packet = self.get_keepalive_packet()
+        return [packet] if packet else []
 
     @property
     def name(self) -> str:
@@ -260,13 +283,18 @@ class KingSongUnpacker:
 
 
 class GotwayUnpacker:
-    """Unpacker for Gotway/Begode protocol.
-    
-    Frame format: 55 AA [18 bytes data] 5A 5A 5A 5A
-    Fixed 20-byte packets with 4-byte footer.
+    """Frame assembler for Gotway/Begode, as in EUC World (wh/s.java h()).
+
+    Wire frame (24 bytes): 55 AA, 16 bytes of data, frame type (byte 18),
+    sub-index (byte 19), footer 5A 5A 5A 5A. EUC World appends each BLE chunk
+    to a buffer, takes the span from the first 55 AA to the next 5A 5A 5A 5A
+    after it, drops everything up to the end of that span, and only decodes
+    the span when it is exactly 24 bytes long. A buffer over 40 bytes with no
+    complete span is discarded.
     """
 
-    FRAME_SIZE = 20
+    FRAME_SIZE = 24
+    MAX_BUFFER = 40
     HEADER = bytes([0x55, 0xAA])
     FOOTER = bytes([0x5A, 0x5A, 0x5A, 0x5A])
 
@@ -274,30 +302,22 @@ class GotwayUnpacker:
         self.buffer = bytearray()
 
     def add_data(self, data: bytes) -> list[bytes]:
-        """Add data and return complete frames."""
+        """Add a BLE chunk and return the complete 24-byte frames it finished."""
         self.buffer.extend(data)
         frames = []
-        
-        while len(self.buffer) >= self.FRAME_SIZE:
-            # Look for header
-            if self.buffer[:2] == self.HEADER:
-                if len(self.buffer) >= self.FRAME_SIZE:
-                    frame = bytes(self.buffer[:self.FRAME_SIZE])
-                    # Verify footer
-                    if frame[-4:] == self.FOOTER:
-                        frames.append(frame)
-                        self.buffer = self.buffer[self.FRAME_SIZE:]
-                    else:
-                        # Invalid frame, skip header
-                        self.buffer = self.buffer[2:]
-                else:
-                    # Wait for more data
-                    break
-            else:
-                # Skip one byte and keep looking
-                self.buffer = self.buffer[1:]
-        
-        return frames
+        while True:
+            start = self.buffer.find(self.HEADER)
+            end = self.buffer.find(self.FOOTER, start) if start > -1 else -1
+            if start > -1 and end > start:
+                span = bytes(self.buffer[start:end + 4])
+                del self.buffer[:end + 4]
+                if len(span) == self.FRAME_SIZE:
+                    frames.append(span)
+                continue
+            if len(self.buffer) > self.MAX_BUFFER:
+                _LOGGER.debug("Gotway buffer overrun; dropped %s", self.buffer.hex())
+                self.buffer = bytearray(data)
+            return frames
 
 
 class VeteranDecoder(EucDecoder):
@@ -609,114 +629,235 @@ class KingSongDecoder(EucDecoder):
 
 
 class GotwayDecoder(EucDecoder):
-    """Decoder for Gotway/Begode wheels.
-    
-    Supports all Gotway/Begode models with automatic voltage detection.
+    """Decoder for Gotway/Begode wheels, following EUC World 2.68.0 (wh/s.java).
+
+    The wheel streams 24-byte frames unprompted. Its voltage field is always
+    scaled as if the pack were 16S (67.2 V); the real voltage needs the wheel
+    model's full-pack voltage, which EUC World takes from its model table
+    (gotway_models.py). The model is matched from the wheel's answers to the
+    single-byte "N" (name) and "V" (firmware) requests sent after connecting.
+    Until a model is known, voltage, battery percent and system voltage are
+    None and only the 67.2 V-scaled ``raw_voltage`` is reported, as EUC World
+    does (it shows no voltage without a model).
+
+    EUC World exposes no charging flag or battery charging current for this
+    protocol, so ``is_charging``/``charging_current`` are None (unknown).
     """
+
+    # Raw 0.01 V reading -> pack voltage, keyed by int(full voltage) (wh/s.java).
+    # Models not listed (67.2 V, 126 V) are used unscaled.
+    VOLTAGE_RATIOS = {
+        42: 0.625, 84: 1.25, 100: 1.5, 134: 2.0,
+        151: 2.25, 168: 2.5, 210: 3.125, 252: 3.75,
+    }
+    REQUEST_NAME = b"N"
+    REQUEST_FIRMWARE = b"V"
+    PROBE_FIRST_DELAY = 0.25   # wh/s.java e(): first "N" 250 ms after connect
+    PROBE_TIMEOUT = 1.5        # gi/j, gi/l: retry timer A1 posted for 1500 ms
+    PROBE_STEP_DELAY = 0.1     # B()/C(): next request posted after 100 ms
+    PROBE_ATTEMPTS = 2         # B()/C(): counter set to 2, decremented per timeout
+    NAME_RE = re.compile(rb"NAME:(.*)")
+    FIRMWARE_RE = re.compile(rb"^(GW|JL|JN|CF)\d{7}")
+
+    request_interval = 0.05
 
     def __init__(self) -> None:
         super().__init__()
         self.unpacker = GotwayUnpacker()
-        self.system_voltage = 84.0  # Default 20S
-        self.model_name = "Gotway"
+        self._clock = time.monotonic
+        self.wheel_name: Optional[str] = None
+        self.firmware: Optional[str] = None
+        self.model: Optional[GotwayModel] = None
+        self._model_forced = False
+        self.trip_distance: Optional[float] = None
+        self.total_distance: Optional[float] = None
+        self.reset_session()
 
     @property
     def brand(self) -> WheelBrand:
         return WheelBrand.GOTWAY
 
+    # --- model selection -------------------------------------------------
+
+    def set_model(self, name: str) -> bool:
+        """Select a model from the table by its EUC World name (manual override)."""
+        for model in GOTWAY_MODELS:
+            if model.name == name:
+                self.model = model
+                self._model_forced = True
+                return True
+        return False
+
+    def _match_model(self) -> None:
+        """Pick the model by wheel name, else by firmware string (EUC World order)."""
+        if self._model_forced:
+            return
+        if self.wheel_name is not None:
+            for model in GOTWAY_MODELS:
+                if any(re.fullmatch(p, self.wheel_name) for p in model.match_by_name):
+                    self.model = model
+                    _LOGGER.info("Gotway wheel name %r matched model %s", self.wheel_name, model.name)
+                    return
+        if self.firmware is not None:
+            for model in GOTWAY_MODELS:
+                if any(re.fullmatch(p, self.firmware) for p in model.match_by_firmware):
+                    self.model = model
+                    _LOGGER.info("Gotway firmware %r matched model %s", self.firmware, model.name)
+                    return
+        _LOGGER.info(
+            "No Gotway model matches name %r / firmware %r; voltage and battery "
+            "percent are unavailable (raw 67.2 V-scaled voltage is still reported)",
+            self.wheel_name, self.firmware,
+        )
+
+    # --- name / firmware probe --------------------------------------------
+
+    def reset_session(self) -> None:
+        """Restart the name/firmware probe (EUC World does this on every connect)."""
+        self._probe = "name"
+        self._attempts_left = self.PROBE_ATTEMPTS
+        self._next_send = self._clock() + self.PROBE_FIRST_DELAY
+        self._deadline: Optional[float] = None
+
+    def get_requests(self) -> list[bytes]:
+        """Send "N", then "V", each retried once after 1.5 s without an answer."""
+        if self._probe == "done":
+            return []
+        now = self._clock()
+        if self._deadline is not None:
+            if now < self._deadline:
+                return []
+            self._deadline = None
+            self._attempts_left -= 1
+            if self._attempts_left <= 0:
+                # Timed out twice: EUC World gives up and goes straight to live data
+                # (a failed name probe skips the firmware probe too).
+                self._finish_probe()
+                return []
+            self._next_send = now
+        if now < self._next_send:
+            return []
+        self._deadline = now + self.PROBE_TIMEOUT
+        return [self.REQUEST_NAME if self._probe == "name" else self.REQUEST_FIRMWARE]
+
+    def _finish_probe(self) -> None:
+        self._probe = "done"
+        self._match_model()
+
+    def _handle_probe_reply(self, data: bytes) -> None:
+        if self._probe == "name":
+            match = self.NAME_RE.search(data)
+            if match:
+                self.wheel_name = match.group(1).decode("latin-1")
+                _LOGGER.debug("Gotway wheel name: %s", self.wheel_name)
+                self._probe = "firmware"
+                self._attempts_left = self.PROBE_ATTEMPTS
+                self._deadline = None
+                self._next_send = self._clock() + self.PROBE_STEP_DELAY
+        elif self._probe == "firmware":
+            match = self.FIRMWARE_RE.match(data)
+            if match:
+                self.firmware = match.group(0).decode("latin-1")
+                _LOGGER.debug("Gotway firmware: %s", self.firmware)
+                self._finish_probe()
+
+    # --- frames -------------------------------------------------------------
+
     def decode(self, data: bytes) -> Optional[dict[str, Any]]:
         """Decode BLE notification data."""
         if not data:
             return None
+        if self._probe != "done":
+            self._handle_probe_reply(data)
 
-        frames = self.unpacker.add_data(data)
         result = None
-        
-        for frame in frames:
+        for frame in self.unpacker.add_data(data):
             decoded = self._decode_frame(frame)
             if decoded:
                 result = decoded
-                
         return result
 
     def _decode_frame(self, buff: bytes) -> Optional[dict[str, Any]]:
-        """Decode a complete frame."""
-        if len(buff) < 20:
+        """Decode one 24-byte frame. Only type 0 (live data) produces output."""
+        frame_type = buff[18]
+        model = self.model
+        distance_ratio = model.distance_correction if model else 1.0
+        if frame_type == 0x04:
+            # Total distance: unsigned 32-bit BE metres at offset 2.
+            self.total_distance = struct.unpack(">I", buff[2:6])[0] * 0.001 * distance_ratio
+            return None
+        if frame_type != 0x00:
+            return None
+
+        speed_raw = struct.unpack(">h", buff[4:6])[0] * 0.036
+        raw_voltage = struct.unpack(">H", buff[2:4])[0] * 0.01
+        phase_current = struct.unpack(">h", buff[10:12])[0] * 0.01
+        # Java int division: getShort(12) / 340 truncates before adding 36.53.
+        temp_raw = struct.unpack(">h", buff[12:14])[0]
+        temperature = int(temp_raw / 340) + 36.53
+        if not (
+            40.0 <= raw_voltage <= 72.0
+            and -200.0 <= speed_raw <= 200.0
+            and -300.0 <= phase_current <= 300.0
+            and -20.0 <= temperature <= 90.0
+        ):
+            _LOGGER.debug("Gotway frame out of range, dropped: %s", buff.hex())
             self.error_count += 1
             return None
 
-        try:
-            frame_type = buff[18] if len(buff) > 18 else 0
-            
-            # Live data frame (0x00)
-            if frame_type == 0x00:
-                voltage = struct.unpack(">H", buff[2:4])[0] / 100.0
-                speed = struct.unpack(">h", buff[4:6])[0] * 3.6 * 0.875  # Apply scaler
-                current = struct.unpack(">h", buff[10:12])[0] / 100.0
-                temperature = struct.unpack(">h", buff[12:14])[0] / 340.0 + 36.53  # MPU6050
-                
-                # Distance varies by firmware
-                total_distance = struct.unpack(">I", buff[8:12])[0] * 0.875 / 1000.0
-                
-                # PWM
-                pwm = abs(struct.unpack(">h", buff[14:16])[0]) / 10.0
-                
-                # Auto-detect system voltage
-                self._detect_voltage(voltage)
-                
-                battery_percent = self.calculate_battery_percent(voltage, self.system_voltage)
-                
-                # Infer charging from current
-                is_charging = current < -0.5
-                
-                self.packet_count += 1
-                
-                self.last_telemetry.voltage = voltage
-                self.last_telemetry.speed = speed
-                self.last_telemetry.total_distance = total_distance
-                self.last_telemetry.current = current
-                self.last_telemetry.temperature = temperature
-                self.last_telemetry.battery_percent = battery_percent
-                self.last_telemetry.is_charging = is_charging
-                self.last_telemetry.pwm = pwm
-                self.last_telemetry.model = self.model_name
-                self.last_telemetry.manufacturer = "Begode"
-                self.last_telemetry.system_voltage = self.system_voltage
+        speed = abs(speed_raw) * (model.speed_correction if model else 1.0)
+        self.trip_distance = struct.unpack(">H", buff[8:10])[0] * 0.001 * distance_ratio
+        # EUC World's current metric: phase current signed by direction of travel.
+        current = (1.0 if speed_raw > 0 else -1.0 if speed_raw < 0 else 0.0) * phase_current
 
-                return {
-                    "voltage": voltage,
-                    "speed": speed,
-                    "total_distance": total_distance,
-                    "current": current,
-                    "temperature": temperature,
-                    "battery_percent": battery_percent,
-                    "is_charging": is_charging,
-                    "pwm": pwm,
-                    "model": self.model_name,
-                    "manufacturer": "Begode",
-                    "system_voltage": self.system_voltage,
-                }
+        voltage = battery_percent = system_voltage = None
+        if model:
+            system_voltage = model.full_voltage
+            voltage = raw_voltage * self.VOLTAGE_RATIOS.get(int(model.full_voltage), 1.0)
+            battery_percent = self._battery_percent(voltage, model)
 
-        except (struct.error, IndexError) as e:
-            _LOGGER.debug(f"Gotway decode error: {e}")
-            self.error_count += 1
-            return None
+        self.packet_count += 1
+        model_name = model.name if model else "Gotway"
+        manufacturer = (model.make if model and model.make else "Begode")
+        return {
+            "voltage": round(voltage, 2) if voltage is not None else None,
+            "raw_voltage": round(raw_voltage, 2),
+            "speed": round(speed, 2),
+            "trip_distance": round(self.trip_distance, 3),
+            "total_distance": (
+                round(self.total_distance, 3) if self.total_distance is not None else None
+            ),
+            "current": round(current, 2),
+            "temperature": round(temperature, 2),
+            "battery_percent": battery_percent,
+            "is_charging": None,
+            "charging_current": None,
+            "charging_power": None,
+            "battery_current": None,
+            "model": model_name,
+            "version": self.firmware,
+            "manufacturer": manufacturer,
+            "system_voltage": system_voltage,
+        }
 
-        return None
+    @staticmethod
+    def _battery_percent(voltage: float, model: GotwayModel) -> float:
+        """EUC World's default ("discharge map") battery level for Gotway.
 
-    def _detect_voltage(self, voltage: float) -> None:
-        """Auto-detect system voltage based on measured voltage."""
-        if voltage > 115.0:
-            if voltage > 140.0:
-                self.system_voltage = 151.2  # 36S
-            else:
-                self.system_voltage = 126.0  # 30S
-        elif voltage > 90.0:
-            self.system_voltage = 100.8  # 24S
-        elif voltage > 75.0:
-            self.system_voltage = 84.0  # 20S
-        else:
-            self.system_voltage = 67.2  # 16S
+        Linear from the model's empty voltage (default full * 0.7857142857) at
+        0 % to full - 0.5 V at 100 %, clamped (zh/a.java, battery_level = 0).
+        """
+        full = model.full_voltage - 0.5
+        empty = (
+            model.empty_voltage
+            if model.empty_voltage is not None
+            else model.full_voltage * 0.7857142857142856
+        )
+        if voltage <= empty:
+            return 0.0
+        if voltage >= full:
+            return 100.0
+        return round((voltage - empty) / (full - empty) * 100.0, 1)
 
 
 # Placeholder decoders for InMotion and Ninebot
@@ -800,6 +941,8 @@ class InMotionDecoder(EucDecoder):
     - Includes checksum validation
     - Requires password authentication on some models
     """
+
+    request_interval = 0.025  # keepalive every 25 ms
 
     def __init__(self) -> None:
         super().__init__()
@@ -992,6 +1135,8 @@ class InMotionV2Decoder(EucDecoder):
     - Uses simple checksum validation
     - Newer InMotion models (V11+)
     """
+
+    request_interval = 0.025  # keepalive every 25 ms
 
     def __init__(self) -> None:
         super().__init__()
@@ -1633,23 +1778,18 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
     Detects protocol by examining packet headers with minimum length requirements:
     - DC 5A 5C [len]: Veteran/Leaperkim (min 4 bytes)
     - AA 55 [len] [cmd]: KingSong (min 4 bytes, cmd=0xA9 for live data)
-    - 55 AA DC 5A: Gotway/Begode (min 4 bytes, distinctive 4-byte header)
-    - 55 AA [len] [cmd]: Ninebot (min 4 bytes, encrypted, cmd=0x01-0x04)
+    - 55 AA: Gotway/Begode, which streams frames unprompted (the former
+      "55 AA DC 5A" signature does not exist in the protocol)
     - DC 5A [flags]: InMotion V2 (min 3 bytes, flags=0x11/0x14)
     - AA AA [len] [cmd]: InMotion V1 (min 4 bytes, CAN-style)
     - 5A A5 [len] [cmd]: Ninebot Z (min 4 bytes, Z-series header)
-    
-    Protocol detection priority (to handle overlapping headers):
-    1. Check unique 4-byte headers first (Gotway 55 AA DC 5A)
-    2. Check unique 3-byte headers (Veteran DC 5A 5C, Ninebot Z 5A A5)
-    3. Disambiguate 2-byte headers (55 AA, AA 55, AA AA, DC 5A) using subsequent bytes
     """
     if len(data) < 2:
         return None
     
-    # Priority 1: Unique 4-byte header - Gotway (55 AA DC 5A)
-    if len(data) >= 4 and data[0] == 0x55 and data[1] == 0xAA and data[2] == 0xDC and data[3] == 0x5A:
-        _LOGGER.debug("Detected Gotway/Begode protocol (55 AA DC 5A header)")
+    # 55 AA: Gotway/Begode streams 24-byte frames with this header unprompted.
+    if len(data) >= 4 and data[0] == 0x55 and data[1] == 0xAA:
+        _LOGGER.debug("Detected Gotway/Begode protocol (55 AA header)")
         return GotwayDecoder()
     
     # Priority 2: Unique 3-byte headers
@@ -1695,18 +1835,6 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
         if flags != 0x5C and flags <= 0x1F:
             _LOGGER.debug("Detected InMotion V2 protocol (DC 5A, flags=%02x)", flags)
             return InMotionV2Decoder()
-    
-    # Check for Ninebot standard (55 AA [len] [cmd])
-    # Ninebot uses 55 AA like Gotway but WITHOUT DC 5A after
-    # Typical len is 0x03-0x20, cmd is 0x01-0x04 for common requests
-    if len(data) >= 4 and data[0] == 0x55 and data[1] == 0xAA:
-        packet_len = data[2]
-        cmd = data[3] if len(data) > 3 else 0
-        # If NOT followed by DC 5A (Gotway marker), assume Ninebot
-        if data[2] != 0xDC:
-            if packet_len >= 0x03 and packet_len <= 0x30:
-                _LOGGER.debug("Detected Ninebot protocol (55 AA, len=%02x, cmd=%02x)", packet_len, cmd)
-                return NinebotDecoder()
     
     # Fallback: Log unknown protocol with more context
     hex_dump = data[:min(8, len(data))].hex()

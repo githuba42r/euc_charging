@@ -106,16 +106,9 @@ class TestGotwayDecoder(unittest.TestCase):
         decoder = get_decoder_by_data(packet)
         self.assertIsInstance(decoder, GotwayDecoder)
 
-    def test_gotway_voltage_detection(self):
-        """Test voltage-based cell configuration detection."""
-        # Test with 24S voltage (100.8V system)
-        packet = bytes([
-            0x55, 0xAA, 0xDC, 0x5A,  # Header
-            0x27, 0x10,  # Voltage: 10000 / 100 = 100V (24S)
-        ] + [0x00] * 30)
-        
-        result = self.decoder.decode(packet)
-        self.assertIsNone(result)  # Needs full frame
+    # Gotway frame decoding (24-byte frames, model-based voltage scaling) is
+    # covered in test_gotway_euc_world.py; the old voltage-threshold
+    # detection test was removed with that behaviour.
 
 
 class TestInMotionDecoder(unittest.TestCase):

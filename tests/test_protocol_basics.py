@@ -18,11 +18,11 @@ print(f"KingSong header: {kingsong_packet[:4].hex()}")
 assert kingsong_packet[0] == 0xAA and kingsong_packet[1] == 0x55
 print("✓ KingSong protocol detection works")
 
-# Test 3: Gotway protocol detection (55 AA DC 5A - unique 4-byte header)
-gotway_packet = bytes([0x55, 0xAA, 0xDC, 0x5A])
+# Test 3: Gotway protocol detection (55 AA header, 24-byte frames ending 5A 5A 5A 5A)
+gotway_packet = bytes([0x55, 0xAA, 0x17, 0x70])
 print(f"Gotway header: {gotway_packet[:4].hex()}")
-assert gotway_packet[0] == 0x55 and gotway_packet[1] == 0xAA and gotway_packet[2] == 0xDC and gotway_packet[3] == 0x5A
-print("✓ Gotway protocol detection works (55 AA DC 5A)")
+assert gotway_packet[0] == 0x55 and gotway_packet[1] == 0xAA
+print("✓ Gotway protocol detection works (55 AA)")
 
 # Test 4: InMotion V1 protocol detection (AA AA with small len)
 inmotion_packet = bytes([0xAA, 0xAA, 0x09, 0x01])
