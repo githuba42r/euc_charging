@@ -5,6 +5,9 @@ state-computation methods are called without going through the entity
 platform (never call async_write_ha_state here).
 """
 
+import asyncio
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +16,8 @@ pytest.importorskip("homeassistant")
 
 from homeassistant.components import bluetooth  # noqa: E402
 from homeassistant.const import CONF_ADDRESS  # noqa: E402
+from homeassistant.core import State  # noqa: E402
+from homeassistant.helpers.restore_state import RestoredExtraData  # noqa: E402
 
 from euc_charging import tpms_entities  # noqa: E402
 from euc_charging.const import (  # noqa: E402
@@ -24,6 +29,7 @@ from euc_charging.tpms_coordinator import TpmsCoordinator  # noqa: E402
 from euc_charging.tpms_entities import (  # noqa: E402
     TPMS_SENSORS,
     TpmsEntity,
+    TpmsSensor,
     build_tpms_alarms,
 )
 
@@ -134,6 +140,132 @@ def test_low_battery_alarm_false_for_98_percent():
     low_battery._update_from_coordinator()
 
     assert low_battery._attr_is_on is False
+
+
+# --- Low Pressure: live threshold, persisted pressure (no reload) ------------
+
+def _stub_restore(entity, extra=None, state=None):
+    """Make an entity's restore lookups return the given data (no hass)."""
+    async def last_extra():
+        return extra
+
+    async def last_state():
+        return state
+
+    entity.async_get_last_extra_data = last_extra
+    entity.async_get_last_state = last_state
+    entity.async_write_ha_state = lambda: entity.__dict__.setdefault("writes", []).append(1)
+
+
+def test_low_pressure_restores_pressure_and_uses_current_threshold():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    # Old state was "off" (computed with an older 30 psi minimum); 210 kPa is
+    # below the current 31 psi minimum, so the restored alarm must be on.
+    entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 31})
+    low_pressure, _ = build_tpms_alarms(coordinator, entry)
+    _stub_restore(
+        low_pressure,
+        extra=RestoredExtraData({"pressure_kpa": 210.0}),
+        state=State("binary_sensor.front_low_pressure", "off"),
+    )
+
+    asyncio.run(low_pressure.async_added_to_hass())
+
+    assert low_pressure._attr_is_on is True
+
+
+def test_low_pressure_persists_last_pressure():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
+    low_pressure, _ = build_tpms_alarms(coordinator, make_entry())
+    low_pressure._update_from_coordinator()
+
+    assert low_pressure.extra_restore_state_data.as_dict() == {"pressure_kpa": 210.0}
+
+
+def test_low_pressure_unknown_when_no_pressure_ever_known():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    low_pressure, _ = build_tpms_alarms(coordinator, make_entry())
+    _stub_restore(low_pressure)
+
+    asyncio.run(low_pressure.async_added_to_hass())
+
+    assert low_pressure._attr_is_on is None
+    assert low_pressure.extra_restore_state_data.as_dict() == {"pressure_kpa": None}
+
+
+def test_options_change_flips_low_pressure_without_new_advert():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    coordinator.handle_advertisement(advert(README_PAYLOAD))
+    entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 30})
+    low_pressure, low_battery = build_tpms_alarms(coordinator, entry)
+    _stub_restore(low_pressure)
+    _stub_restore(low_battery)
+    asyncio.run(low_pressure.async_added_to_hass())
+    asyncio.run(low_battery.async_added_to_hass())
+    assert low_pressure._attr_is_on is False
+
+    entry.options = {CONF_MIN_PRESSURE_PSI: 31}
+    coordinator.async_notify_listeners()
+
+    assert low_pressure._attr_is_on is True
+    assert low_pressure.writes == [1]
+    assert low_battery._attr_is_on is False
+
+
+def test_options_change_reevaluates_restored_pressure_without_reading():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    entry = make_entry(options={CONF_MIN_PRESSURE_PSI: 30})
+    low_pressure, low_battery = build_tpms_alarms(coordinator, entry)
+    _stub_restore(low_pressure, extra=RestoredExtraData({"pressure_kpa": 210.0}))
+    _stub_restore(low_battery, state=State("binary_sensor.front_low_battery", "on"))
+    asyncio.run(low_pressure.async_added_to_hass())
+    asyncio.run(low_battery.async_added_to_hass())
+    assert low_pressure._attr_is_on is False
+
+    entry.options = {CONF_MIN_PRESSURE_PSI: 31}
+    coordinator.async_notify_listeners()
+
+    assert low_pressure._attr_is_on is True
+    assert low_battery._attr_is_on is True  # restored state kept, not cleared
+
+
+def test_sensor_keeps_restored_value_when_notified_without_reading():
+    coordinator = TpmsCoordinator(hass=None, address=ADDRESS)
+    pressure = next(d for d in TPMS_SENSORS if d.key == "pressure")
+    sensor = TpmsSensor(coordinator, make_entry(), pressure)
+    sensor._attr_native_value = 205.0
+    sensor.async_write_ha_state = lambda: None
+    coordinator.async_add_listener(sensor._handle_update)
+
+    coordinator.async_notify_listeners()
+
+    assert sensor._attr_native_value == 205.0
+
+
+def _load_integration_init():
+    """Import the integration's __init__.py as a submodule of the test package."""
+    path = Path(tpms_entities.__file__).with_name("__init__.py")
+    spec = importlib.util.spec_from_file_location(
+        "euc_charging._integration_init", path, submodule_search_locations=[]
+    )
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "euc_charging"  # resolve ".const" etc. against the test package
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_options_update_listener_notifies_coordinator():
+    integration = _load_integration_init()
+    assert not hasattr(integration, "_async_reload_entry")
+    calls = []
+    coordinator = SimpleNamespace(async_notify_listeners=lambda: calls.append(1))
+    entry = SimpleNamespace(entry_id="tpms-entry")
+    hass = SimpleNamespace(data={DOMAIN: {"tpms-entry": coordinator}})
+
+    asyncio.run(integration._async_tpms_options_updated(hass, entry))
+
+    assert calls == [1]
 
 
 # --- _resolve_via_device_id --------------------------------------------------

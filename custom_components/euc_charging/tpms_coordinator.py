@@ -82,5 +82,10 @@ class TpmsCoordinator:
         self.reading = reading
         age = max(0.0, bluetooth.MONOTONIC_TIME() - service_info.time)
         self.last_seen = dt_util.utcnow() - timedelta(seconds=age)
+        self.async_notify_listeners()
+
+    @callback
+    def async_notify_listeners(self) -> None:
+        """Tell entities to refresh (new reading, or options changed)."""
         for update_callback in list(self._listeners):
             update_callback()

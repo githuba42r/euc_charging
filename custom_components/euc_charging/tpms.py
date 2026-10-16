@@ -55,7 +55,12 @@ def is_tpms_advertisement(name: str | None, manufacturer_data: Mapping[int, byte
 
 def is_low_pressure(reading: TpmsReading, min_pressure_psi: float) -> bool:
     """Return True if gauge pressure is below the configured minimum."""
-    return reading.pressure_kpa < min_pressure_psi * KPA_PER_PSI
+    return is_below_min_pressure(reading.pressure_kpa, min_pressure_psi)
+
+
+def is_below_min_pressure(pressure_kpa: float, min_pressure_psi: float) -> bool:
+    """Return True if a gauge pressure in kPa is below a minimum in psi."""
+    return pressure_kpa < min_pressure_psi * KPA_PER_PSI
 
 
 def is_low_battery(reading: TpmsReading) -> bool:

@@ -50,14 +50,18 @@ async def _async_setup_tpms_entry(hass: HomeAssistant, entry: ConfigEntry) -> bo
     coordinator.async_start()
     entry.async_on_unload(coordinator.async_shutdown)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    entry.async_on_unload(entry.add_update_listener(_async_tpms_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, TPMS_PLATFORMS)
     return True
 
 
-async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload a TPMS entry when its options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
+async def _async_tpms_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Re-evaluate TPMS alarms against the new options (no reload).
+
+    Reloading would drop the coordinator's reading, leaving the Low Pressure
+    alarm on a state computed with the old minimum until the sensor wakes.
+    """
+    hass.data[DOMAIN][entry.entry_id].async_notify_listeners()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

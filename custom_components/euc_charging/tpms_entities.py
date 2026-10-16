@@ -33,7 +33,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import (
+    ExtraStoredData,
+    RestoredExtraData,
+    RestoreEntity,
+)
 
 from .const import (
     CONF_MIN_PRESSURE_PSI,
@@ -42,7 +46,7 @@ from .const import (
     DOMAIN,
     is_tpms_entry,
 )
-from .tpms import is_low_battery, is_low_pressure
+from .tpms import is_below_min_pressure, is_low_battery
 from .tpms_coordinator import TpmsCoordinator
 
 
@@ -175,6 +179,12 @@ class TpmsEntity(Entity):
         self.async_write_ha_state()
 
     def _update_from_coordinator(self) -> None:
+        """Refresh state from the coordinator.
+
+        Called on every coordinator notification, including option changes
+        with no reading yet, so implementations must keep their restored
+        value when ``coordinator.reading`` is None.
+        """
         raise NotImplementedError
 
 
@@ -197,6 +207,8 @@ class TpmsSensor(TpmsEntity, RestoreSensor):
             self._attr_native_value = last.native_value
 
     def _update_from_coordinator(self) -> None:
+        if self.coordinator.reading is None:
+            return
         self._attr_native_value = self.entity_description.value_fn(self.coordinator)
 
 
@@ -219,24 +231,64 @@ class TpmsAlarm(TpmsEntity, BinarySensorEntity, RestoreEntity):
             self._attr_is_on = last.state == STATE_ON
 
     def _update_from_coordinator(self) -> None:
+        if self.coordinator.reading is None:
+            return
         self._attr_is_on = self._predicate(self.coordinator)
+
+
+class TpmsLowPressureAlarm(TpmsEntity, BinarySensorEntity, RestoreEntity):
+    """Low Pressure alarm, evaluated against the current minimum-pressure option.
+
+    The last known pressure is kept (and persisted as extra restore data) so
+    the alarm can be re-evaluated after a restart or an options change without
+    waiting for the sensor to wake and advertise again.
+    """
+
+    def __init__(self, coordinator: TpmsCoordinator, entry: ConfigEntry,
+                 via_device_id: str | None = None) -> None:
+        super().__init__(coordinator, entry, "low_pressure", via_device_id)
+        self.entity_description = BinarySensorEntityDescription(
+            key="low_pressure", name="Low Pressure",
+            device_class=BinarySensorDeviceClass.PROBLEM,
+        )
+        self._pressure_kpa: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self.coordinator.reading is not None:
+            self._update_from_coordinator()
+            return
+        if (extra := await self.async_get_last_extra_data()) is not None:
+            self._pressure_kpa = extra.as_dict().get("pressure_kpa")
+        if self._pressure_kpa is not None:
+            self._evaluate()
+        elif (last := await self.async_get_last_state()) is not None and last.state in ("on", "off"):
+            # Pre-upgrade state saved without a pressure: best available.
+            self._attr_is_on = last.state == STATE_ON
+
+    @property
+    def extra_restore_state_data(self) -> ExtraStoredData:
+        return RestoredExtraData({"pressure_kpa": self._pressure_kpa})
+
+    def _update_from_coordinator(self) -> None:
+        if self.coordinator.reading is not None:
+            self._pressure_kpa = self.coordinator.reading.pressure_kpa
+        self._evaluate()
+
+    def _evaluate(self) -> None:
+        """Compare the last known pressure with the current minimum option."""
+        if self._pressure_kpa is None:
+            return
+        min_psi = self._entry.options.get(CONF_MIN_PRESSURE_PSI, DEFAULT_MIN_PRESSURE_PSI)
+        self._attr_is_on = is_below_min_pressure(self._pressure_kpa, min_psi)
 
 
 def build_tpms_alarms(
     coordinator: TpmsCoordinator, entry: ConfigEntry, via_device_id: str | None = None
-) -> list[TpmsAlarm]:
+) -> list[BinarySensorEntity]:
     """Build the Low Pressure / Low Battery alarm entities for a TPMS entry."""
-    min_psi = entry.options.get(CONF_MIN_PRESSURE_PSI, DEFAULT_MIN_PRESSURE_PSI)
     return [
-        TpmsAlarm(
-            coordinator, entry,
-            BinarySensorEntityDescription(
-                key="low_pressure", name="Low Pressure",
-                device_class=BinarySensorDeviceClass.PROBLEM,
-            ),
-            lambda c: is_low_pressure(c.reading, min_psi),
-            via_device_id,
-        ),
+        TpmsLowPressureAlarm(coordinator, entry, via_device_id),
         TpmsAlarm(
             coordinator, entry,
             BinarySensorEntityDescription(
