@@ -90,3 +90,11 @@ def test_gotway_probe_written_through_loop():
 
     asyncio.run(run())
     assert c.client.writes == [(GOTWAY_READ_UUID, b"N")]
+
+
+def test_kingsong_has_write_path_for_name_request():
+    from euc_charging.const import KINGSONG_READ_UUID
+
+    c = bare_coordinator()
+    c._setup_uuids_for_brand(WheelBrand.KINGSONG)
+    assert c._write_uuid == KINGSONG_READ_UUID and c._requires_keepalive

@@ -64,27 +64,9 @@ class TestKingSongDecoder(unittest.TestCase):
         """Set up test fixtures."""
         self.decoder = KingSongDecoder()
 
-    def test_kingsong_live_data(self):
-        """Test decoding KingSong live data packet."""
-        # Sample packet from KS-S18 (20S, 84V system)
-        # AA 55 14 5A A9 14 A0 00 00 00 C8 01 F4 00 00 1E 5A 00 00 00 00 [checksum]
-        packet = bytes([
-            0xAA, 0x55,  # Header
-            0x14, 0x5A, 0xA9,  # Length + sequence
-            0x14, 0xA0,  # Voltage: 5280 / 100 = 52.80V (discharged 20S)
-            0x00, 0x00,  # Speed: 0
-            0x00, 0xC8,  # Trip: 200 / 1000 = 0.2 km
-            0x01, 0xF4, 0x00, 0x00,  # Total: 500 km
-            0x1E,  # Current: 30 / 100 = 0.3A
-            0x5A,  # Temperature: 90 / 100 = 0.9°C (likely / 10 = 9°C)
-            0x00, 0x00,  # PWM
-            0x00, 0x00,  # Checksum (placeholder)
-        ])
-
-        result = self.decoder.decode(packet)
-        
-        # KingSong uses unpacker too
-        self.assertIsNone(result)
+    # The old live-data test fed a made-up big-endian layout; the EUC World
+    # layout (little-endian, command at byte 16) is covered in
+    # test_kingsong_euc_world.py.
 
     def test_kingsong_protocol_detection(self):
         """Test that KingSong protocol is detected correctly."""

@@ -13,7 +13,7 @@ assert veteran_packet[0] == 0xDC and veteran_packet[1] == 0x5A and veteran_packe
 print("✓ Veteran protocol detection works")
 
 # Test 2: KingSong protocol detection
-kingsong_packet = bytes([0xAA, 0x55, 0x14, 0x5A])
+kingsong_packet = bytes([0xAA, 0x55, 0x40, 0x1F])
 print(f"KingSong header: {kingsong_packet[:4].hex()}")
 assert kingsong_packet[0] == 0xAA and kingsong_packet[1] == 0x55
 print("✓ KingSong protocol detection works")

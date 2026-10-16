@@ -11,6 +11,7 @@ Supports automatic protocol detection for all major EUC brands:
 from __future__ import annotations
 
 import logging
+import math
 import re
 import struct
 import time
@@ -238,47 +239,6 @@ class VeteranUnpacker:
         for byte in data:
             if self.add_char(byte):
                 frames.append(self.get_buffer())
-        return frames
-
-
-class KingSongUnpacker:
-    """Unpacker for KingSong protocol.
-    
-    Frame format: AA 55 [18 bytes data] 5A 5A 5A 5A
-    Fixed 20-byte packets with 4-byte footer.
-    """
-
-    FRAME_SIZE = 20
-    HEADER = bytes([0xAA, 0x55])
-    FOOTER = bytes([0x5A, 0x5A, 0x5A, 0x5A])
-
-    def __init__(self) -> None:
-        self.buffer = bytearray()
-
-    def add_data(self, data: bytes) -> list[bytes]:
-        """Add data and return complete frames."""
-        self.buffer.extend(data)
-        frames = []
-        
-        while len(self.buffer) >= self.FRAME_SIZE:
-            # Look for header
-            if self.buffer[:2] == self.HEADER:
-                if len(self.buffer) >= self.FRAME_SIZE:
-                    frame = bytes(self.buffer[:self.FRAME_SIZE])
-                    # Verify footer
-                    if frame[-4:] == self.FOOTER:
-                        frames.append(frame)
-                        self.buffer = self.buffer[self.FRAME_SIZE:]
-                    else:
-                        # Invalid frame, skip header
-                        self.buffer = self.buffer[2:]
-                else:
-                    # Wait for more data
-                    break
-            else:
-                # Skip one byte and keep looking
-                self.buffer = self.buffer[1:]
-        
         return frames
 
 
@@ -516,116 +476,196 @@ class VeteranDecoder(EucDecoder):
 
 
 class KingSongDecoder(EucDecoder):
-    """Decoder for KingSong wheels.
-    
-    Supports all KingSong models with automatic voltage detection.
+    """Decoder for KingSong wheels, following EUC World 2.68.0 (wh/z.java).
+
+    Every notification is one 20-byte little-endian packet: AA 55, data,
+    command at byte 16 (requests also carry 0x14 at 17 and 5A 5A at 18-19).
+    EUC World takes the first 20 bytes of a notification that starts AA 55 and
+    does no reassembly or footer check. Live data is command 0xA9; the model
+    comes from the 0xBB name reply ("KS-S18-0205" -> model KS-S18, v2.05),
+    which EUC World requests 1 s after connecting and re-requests every 3 s
+    until answered. Battery percent is EUC World's default per-model voltage
+    curve. EUC World has no charging flag for KingSong, so ``is_charging`` and
+    ``charging_current`` are None.
     """
+
+    PACKET_SIZE = 20
+    HEADER = bytes([0xAA, 0x55])
+    CMD_LIVE = 0xA9
+    CMD_DISTANCE = 0xB9
+    CMD_SERIAL = 0xB3
+    CMD_NAME = 0xBB
+    CMD_REQUEST_NAME = 0x9B
+    NAME_FIRST_DELAY = 1.0    # wh/z.java e(): N() posted 1000 ms after connect
+    NAME_RETRY = 3.0          # K(READ_NAME, 3000, INIT_NAME); timeout re-sends (wh/x.java)
+
+    # EUC World battery_level=0 curves (zh/a.java), (volts, percent) points,
+    # chosen by model-name prefix in this order; anything else -> DEFAULT_CURVE.
+    BATTERY_CURVES: tuple[tuple[str, tuple[float, ...], tuple[float, ...]], ...] = (
+        ("KS-16X", (63, 65, 66, 68, 69, 71, 73, 74, 76, 77, 79, 81, 83),
+         (0, 10, 21, 31, 40, 49, 55, 63, 71, 79, 86, 93, 100)),
+        ("KS-18L", (61, 83), (0, 100)),
+        ("KS-F18", (111.6, 149.4), (0, 100)),
+        ("KS-F22P", (130.2, 175.5), (0, 100)),
+        ("KS-F22", (114.7, 153.5), (0, 100)),
+        ("KS-N12P", (50, 66), (0, 100)),
+        ("KS-N", (42.9, 54.6), (0, 100)),
+        ("KS-S16", (63, 83.5), (0, 100)),
+        ("KS-S18", (60, 83), (0, 100)),
+        ("KS-S19", (74.4, 100), (0, 100)),
+        ("KS-S20", (93, 124.5), (0, 100)),
+        ("KS-S22", (93, 124.5), (0, 100)),
+        ("KS-S9", (36, 49.8), (0, 100)),
+        ("KS-X", (33, 42), (0, 100)),
+    )
+    DEFAULT_CURVE = ((50.0, 66.0), (0.0, 100.0))
+
+    # Gauge maximum per model (zh/a.java b()) is 4.25 V x series cells; the
+    # series count recovered from it gives system_voltage = cells x 4.2 V.
+    SERIES_CELLS: tuple[tuple[str, int], ...] = (
+        ("KS-16X", 20), ("KS-18L", 20), ("KS-F18", 36), ("KS-F22P", 42),
+        ("KS-F22", 37), ("KS-N12P", 16), ("KS-N", 13), ("KS-S16", 20),
+        ("KS-S18", 20), ("KS-S19", 24), ("KS-S20", 30), ("KS-S22", 30),
+        ("KS-S9", 12), ("KS-X", 10),
+    )
+    DEFAULT_SERIES = 16
+
+    request_interval = 0.1
 
     def __init__(self) -> None:
         super().__init__()
-        self.unpacker = KingSongUnpacker()
-        self.system_voltage = 67.2  # Default 16S
-        self.model_name = "KingSong"
+        self._clock = time.monotonic
+        self.wheel_name: Optional[str] = None
+        self.model: Optional[str] = None
+        self.version: Optional[str] = None
+        self.serial: Optional[str] = None
+        self.trip_distance: Optional[float] = None
+        self.reset_session()
 
     @property
     def brand(self) -> WheelBrand:
         return WheelBrand.KINGSONG
 
-    def decode(self, data: bytes) -> Optional[dict[str, Any]]:
-        """Decode BLE notification data."""
-        if not data:
-            return None
+    def reset_session(self) -> None:
+        """Re-request the wheel name after every connect."""
+        self._name_answered = False
+        self._next_name_request = self._clock() + self.NAME_FIRST_DELAY
 
-        frames = self.unpacker.add_data(data)
-        result = None
-        
-        for frame in frames:
-            decoded = self._decode_frame(frame)
-            if decoded:
-                result = decoded
-                
-        return result
+    @classmethod
+    def build_request(cls, command: int) -> bytes:
+        """AA 55, zeros, command at 16, 0x14, 5A 5A (wh/z.java y(false))."""
+        packet = bytearray(cls.PACKET_SIZE)
+        packet[0:2] = cls.HEADER
+        packet[16] = command
+        packet[17] = 0x14
+        packet[18] = packet[19] = 0x5A
+        return bytes(packet)
+
+    def get_requests(self) -> list[bytes]:
+        if self._name_answered:
+            return []
+        now = self._clock()
+        if now < self._next_name_request:
+            return []
+        self._next_name_request = now + self.NAME_RETRY
+        return [self.build_request(self.CMD_REQUEST_NAME)]
+
+    def decode(self, data: bytes) -> Optional[dict[str, Any]]:
+        """Decode one notification (EUC World: >= 20 bytes starting AA 55)."""
+        if len(data) < self.PACKET_SIZE or data[:2] != self.HEADER:
+            return None
+        return self._decode_frame(bytes(data[:self.PACKET_SIZE]))
 
     def _decode_frame(self, buff: bytes) -> Optional[dict[str, Any]]:
-        """Decode a complete frame."""
-        if len(buff) < 20:
-            self.error_count += 1
+        command = buff[16]
+        if command == self.CMD_NAME:
+            self._parse_name(buff)
+            return None
+        if command == self.CMD_SERIAL:
+            # Bytes 2..15 and 17..19, NUL-trimmed (wh/z.java, command 0xB3).
+            self.serial = (buff[2:16] + buff[17:20]).decode("ascii", "replace").strip("\x00")
+            return None
+        if command == self.CMD_DISTANCE:
+            hi, lo = struct.unpack_from("<HH", buff, 2)
+            self.trip_distance = (hi * 65536 + lo) * 0.001
+            return None
+        if command != self.CMD_LIVE:
             return None
 
-        try:
-            frame_type = buff[18] if len(buff) > 18 else 0
-            
-            # Live data frame (0xA9)
-            if frame_type == 0xA9:
-                voltage = struct.unpack(">H", buff[2:4])[0] / 100.0
-                speed = struct.unpack(">H", buff[4:6])[0] * 3.6  # Convert to km/h
-                total_distance = struct.unpack(">I", buff[6:10])[0] / 1000.0
-                current = struct.unpack(">h", buff[10:12])[0] / 100.0
-                temperature = struct.unpack(">h", buff[12:14])[0] / 340.0 + 36.53  # MPU6050 formula
-                
-                # Auto-detect system voltage
-                self._detect_voltage(voltage)
-                
-                battery_percent = self.calculate_battery_percent(voltage, self.system_voltage)
-                
-                # KingSong doesn't directly report charging, infer from current
-                is_charging = current < -0.5  # Negative current = charging
-                
-                self.packet_count += 1
-                
-                self.last_telemetry.voltage = voltage
-                self.last_telemetry.speed = speed
-                self.last_telemetry.total_distance = total_distance
-                self.last_telemetry.current = current
-                self.last_telemetry.temperature = temperature
-                self.last_telemetry.battery_percent = battery_percent
-                self.last_telemetry.is_charging = is_charging
-                self.last_telemetry.model = self.model_name
-                self.last_telemetry.manufacturer = "KingSong"
-                self.last_telemetry.system_voltage = self.system_voltage
+        voltage = struct.unpack_from("<h", buff, 2)[0] * 0.01
+        speed = struct.unpack_from("<h", buff, 4)[0] * 0.01
+        hi, lo = struct.unpack_from("<HH", buff, 6)
+        total_distance = (hi * 65536 + lo) * 0.001
+        current = struct.unpack_from("<h", buff, 10)[0] * 0.01
+        temperature = struct.unpack_from("<h", buff, 12)[0] * 0.01
 
-                return {
-                    "voltage": voltage,
-                    "speed": speed,
-                    "total_distance": total_distance,
-                    "current": current,
-                    "temperature": temperature,
-                    "battery_percent": battery_percent,
-                    "is_charging": is_charging,
-                    "model": self.model_name,
-                    "manufacturer": "KingSong",
-                    "system_voltage": self.system_voltage,
-                }
-            
-            # Model/Name frame (0xBB) - could parse model name here
-            elif frame_type == 0xBB:
-                # Model name parsing could be added here
+        battery_percent = system_voltage = None
+        if self._name_answered:
+            battery_percent = self._battery_percent(voltage)
+            system_voltage = round(self._series_cells() * 4.2, 2)
+
+        self.packet_count += 1
+        return {
+            "voltage": round(voltage, 2),
+            "speed": round(speed, 2),
+            "trip_distance": (
+                round(self.trip_distance, 3) if self.trip_distance is not None else None
+            ),
+            "total_distance": round(total_distance, 3),
+            "current": round(current, 2),
+            "temperature": round(temperature, 2),
+            "battery_percent": battery_percent,
+            "is_charging": None,
+            "charging_current": None,
+            "charging_power": None,
+            "battery_current": None,
+            "model": self.model or "KingSong",
+            "version": self.version,
+            "serial": self.serial,
+            "manufacturer": "KingSong",
+            "system_voltage": system_voltage,
+        }
+
+    def _parse_name(self, buff: bytes) -> None:
+        """0xBB: bytes 2..15 = "KS-S18-0205" -> model KS-S18, version 2.05."""
+        name = buff[2:16].decode("utf-8", "replace").strip("\x00")
+        self.wheel_name = name
+        self._name_answered = True
+        parts = name.split("-")
+        if len(parts) == 3:
+            self.model = f"{parts[0]}-{parts[1]}"
+            digits = parts[2].lstrip("0")
+            try:
+                self.version = f"{float(digits) / 100:.2f}"
+            except ValueError:
                 pass
+        _LOGGER.debug("KingSong name %r -> model %s, version %s", name, self.model, self.version)
 
-        except (struct.error, IndexError) as e:
-            _LOGGER.debug(f"KingSong decode error: {e}")
-            self.error_count += 1
-            return None
+    def _battery_percent(self, voltage: float) -> float:
+        model = self.model or ""
+        volts, percents = self.DEFAULT_CURVE
+        for prefix, curve_v, curve_p in self.BATTERY_CURVES:
+            if model.startswith(prefix):
+                volts, percents = curve_v, curve_p
+                break
+        if voltage < volts[0]:
+            return float(percents[0])
+        if voltage > volts[-1]:
+            return float(percents[-1])
+        for i in range(len(volts) - 1):
+            if voltage <= volts[i + 1]:
+                span = volts[i + 1] - volts[i]
+                pct = percents[i] + (voltage - volts[i]) * (percents[i + 1] - percents[i]) / span
+                # EUC World rounds half up (fc/e.java h()).
+                return float(math.floor(pct + 0.5))
+        return float(percents[-1])
 
-        return None
-
-    def _detect_voltage(self, voltage: float) -> None:
-        """Auto-detect system voltage based on measured voltage."""
-        # Check against known configurations
-        if voltage > 90.0:
-            if voltage > 140.0:
-                if voltage > 165.0:
-                    self.system_voltage = 176.4  # 42S
-                else:
-                    self.system_voltage = 151.2  # 36S
-            elif voltage > 115.0:
-                self.system_voltage = 126.0  # 30S
-            else:
-                self.system_voltage = 100.8  # 24S
-        elif voltage > 75.0:
-            self.system_voltage = 84.0  # 20S
-        else:
-            self.system_voltage = 67.2  # 16S
+    def _series_cells(self) -> int:
+        model = self.model or ""
+        for prefix, cells in self.SERIES_CELLS:
+            if model.startswith(prefix):
+                return cells
+        return self.DEFAULT_SERIES
 
 
 class GotwayDecoder(EucDecoder):
@@ -1774,7 +1814,7 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
     
     Detects protocol by examining packet headers with minimum length requirements:
     - DC 5A 5C [len]: Veteran/Leaperkim (min 4 bytes)
-    - AA 55 [len] [cmd]: KingSong (min 4 bytes, cmd=0xA9 for live data)
+    - AA 55: KingSong (20-byte packets, command at byte 16, 0xA9 = live data)
     - 55 AA: Gotway/Begode, which streams frames unprompted; a chunk that is a
       complete checksum-valid Ninebot One frame is Ninebot instead (Ninebot
       only ever answers requests, so it is normally chosen by BLE name before
@@ -1808,18 +1848,10 @@ def get_decoder_by_data(data: bytes) -> Optional[EucDecoder]:
     
     # Priority 3: Disambiguate 2-byte headers using subsequent bytes
     
-    # Check for KingSong (AA 55 [len] [cmd])
-    # KingSong uses cmd=0xA9 for live data, len is typically 0x14-0x18
+    # KingSong: every packet starts AA 55 (wh/z.java h()); no other protocol does.
     if len(data) >= 4 and data[0] == 0xAA and data[1] == 0x55:
-        packet_len = data[2]
-        cmd = data[3] if len(data) > 3 else 0
-        if packet_len >= 0x14 and packet_len <= 0x30 and cmd == 0xA9:
-            _LOGGER.debug("Detected KingSong protocol (AA 55, len=%02x, cmd=A9)", packet_len)
-            return KingSongDecoder()
-        elif packet_len >= 0x14 and packet_len <= 0x30:
-            # Likely KingSong even without cmd check
-            _LOGGER.debug("Detected KingSong protocol (AA 55, len=%02x)", packet_len)
-            return KingSongDecoder()
+        _LOGGER.debug("Detected KingSong protocol (AA 55 header)")
+        return KingSongDecoder()
     
     # Check for InMotion V1 (AA AA [len] [cmd])
     # InMotion V1 uses CAN-style frames, len is typically 0x09-0x0F

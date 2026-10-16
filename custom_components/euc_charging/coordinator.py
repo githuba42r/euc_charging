@@ -145,9 +145,11 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _setup_uuids_for_brand(self, brand: WheelBrand) -> None:
         """Set up read/write UUIDs and keepalive requirements based on brand."""
         if brand == WheelBrand.KINGSONG:
+            # Live data is pushed; the only write is the name request used to
+            # pick the model's battery curve (same characteristic, wh/z.java).
             self._read_uuid = KINGSONG_READ_UUID
-            self._write_uuid = None
-            self._requires_keepalive = False
+            self._write_uuid = KINGSONG_READ_UUID
+            self._requires_keepalive = True
         elif brand in (WheelBrand.GOTWAY, WheelBrand.BEGODE):
             # Gotway streams unprompted; the writes are the one-off "N"/"V"
             # name/firmware probe used to pick the wheel model (same characteristic).
