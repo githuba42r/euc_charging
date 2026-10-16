@@ -32,7 +32,7 @@ BINARY_SENSORS: tuple[EucChargingBinarySensorDescription, ...] = (
         key="is_charging",
         name="Charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
-        value_fn=lambda data: data.get("is_charging", False),  # Default to False if not present
+        value_fn=lambda data: data.get("is_charging"),  # None = protocol can't tell
     ),
 )
 
@@ -105,9 +105,6 @@ class EucChargingBinarySensor(CoordinatorEntity[EucChargingCoordinator], BinaryS
         if not self.coordinator.data:
             # When disconnected, show as Off instead of Unknown
             return False
-        # For is_charging, default to False if not explicitly set
-        # This ensures we show Off instead of Unknown when connected but not charging
-        result = self.entity_description.value_fn(self.coordinator.data)
-        if self.entity_description.key == "is_charging" and result is None:
-            return False
-        return result
+        # Protocols without a charging flag (KingSong, Gotway, InMotion V1)
+        # report is_charging None: show Unknown rather than a false "not charging".
+        return self.entity_description.value_fn(self.coordinator.data)
