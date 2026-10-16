@@ -26,6 +26,7 @@ def chunks():
 def make_coordinator(monkeypatch, name="LK3336"):
     c = object.__new__(coord_mod.EucChargingCoordinator)
     c.ble_device = SimpleNamespace(name=name, address="AA:BB")
+    c.entry = SimpleNamespace(title=name)
     c.decoder = None
     c.client = None
     c._read_uuid = c._write_uuid = None
@@ -47,9 +48,15 @@ def make_coordinator(monkeypatch, name="LK3336"):
     return c
 
 
-@pytest.mark.parametrize("start", [0, 1, 2])
-def test_veteran_capture_through_handler(monkeypatch, start):
-    c = make_coordinator(monkeypatch)
+@pytest.mark.parametrize(
+    "start, name",
+    [(0, "LK3336"), (1, "LK3336"), (2, "LK3336"),
+     # A Veteran whose BLE name looks like another passive brand must still be
+     # decoded (review fix; EUC World switches Gotway -> Veteran too).
+     (0, "GotWay_12345"), (0, "KS-S18"), (0, None)],
+)
+def test_veteran_capture_through_handler(monkeypatch, start, name):
+    c = make_coordinator(monkeypatch, name)
     reference = VeteranDecoder()
     expected = []
     data = chunks()[start:]
@@ -70,3 +77,5 @@ def test_veteran_capture_through_handler(monkeypatch, start):
         got = {k: v for k, v in got.items() if k not in ("charge_estimates", "last_connected_time")}
         assert got == want
     assert len(c.published) == len(expected)
+    if start == 0:
+        assert len(c.published) == 890

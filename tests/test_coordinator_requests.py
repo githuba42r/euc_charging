@@ -19,14 +19,23 @@ class FakeClient:
         self.writes.append((uuid, bytes(data)))
 
 
-def bare_coordinator(name="Whatever"):
+def bare_coordinator(name="Whatever", title="My wheel", services=None):
     c = object.__new__(coord_mod.EucChargingCoordinator)
     c.ble_device = SimpleNamespace(name=name, address="AA:BB")
+    c.entry = SimpleNamespace(title=title)
     c.decoder = None
     c.client = FakeClient()
+    if services is not None:
+        c.client.services = [SimpleNamespace(uuid=u) for u in services]
     c._read_uuid = c._write_uuid = None
     c._requires_keepalive = False
     c._keepalive_task = None
+    c._requests_enabled = asyncio.Event()
+    c._requests_enabled.set()
+    c._write_failure_logged = False
+    c._preselected = False
+    c._preselect_disabled = False
+    c._connects_without_data = 0
     return c
 
 

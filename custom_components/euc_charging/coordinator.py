@@ -30,7 +30,8 @@ from .const import (
     DOMAIN, NOTIFY_UUID, CONF_RETRY_COUNT, DEFAULT_RETRY_COUNT,
     STORAGE_VERSION, STORAGE_SAVE_DELAY,
     KINGSONG_READ_UUID, GOTWAY_READ_UUID, VETERAN_READ_UUID,
-    INMOTION_READ_UUID, INMOTION_WRITE_UUID,
+    INMOTION_READ_UUID, INMOTION_WRITE_UUID, INMOTION_WRITE_SERVICE_UUID,
+    INMOTION_V2_SERVICE_UUID, NINEBOT_SERVICE_UUID,
     INMOTION_V2_READ_UUID, INMOTION_V2_WRITE_UUID,
     NINEBOT_READ_UUID, NINEBOT_WRITE_UUID,
     NINEBOT_Z_READ_UUID, NINEBOT_Z_WRITE_UUID,
@@ -81,6 +82,15 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._read_uuid: str | None = None
         self._write_uuid: str | None = None
         self._requires_keepalive = False
+        # Set once notifications are enabled on a connection; the request loop
+        # waits on it so nothing is written before replies can be received.
+        self._requests_enabled = asyncio.Event()
+        self._write_failure_logged = False
+        # Decoder chosen from the BLE name (request-driven protocols) rather
+        # than from data; dropped if it never decodes anything.
+        self._preselected = False
+        self._preselect_disabled = False
+        self._connects_without_data = 0
         self.auto_connect_enabled = True  # Default to enabled
         self._reconnect_event = asyncio.Event()
         
@@ -182,6 +192,12 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._write_uuid = None
             self._requires_keepalive = False
 
+    # Poll interval once the decoder has nothing left to send.
+    IDLE_REQUEST_INTERVAL = 5.0
+    # Connections without a decoded packet before a name-preselected decoder
+    # is dropped in favour of detecting the protocol from data.
+    PRESELECT_MAX_EMPTY_CONNECTS = 3
+
     async def _keepalive_loop(self) -> None:
         """Write the decoder's requests (keepalives, handshakes, register polls)."""
         if not self._requires_keepalive or not self._write_uuid:
@@ -190,24 +206,38 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         while True:
             try:
                 if not self.client or not self.client.is_connected:
-                    await asyncio.sleep(1)
+                    self._requests_enabled.clear()
+                if not self._requests_enabled.is_set():
+                    # Idle until a connection has notifications enabled.
+                    await self._requests_enabled.wait()
                     continue
                 
                 # The decoder decides what to send and when (static keepalive,
                 # Gotway name probe, Ninebot request/response state machine).
-                interval = 1.0
-                if self.decoder:
-                    interval = self.decoder.request_interval
-                    for packet in self.decoder.get_requests():
+                interval = self.IDLE_REQUEST_INTERVAL
+                decoder = self.decoder
+                if decoder:
+                    for packet in decoder.get_requests():
                         if not self._write_uuid:
                             break
-                        await self.client.write_gatt_char(self._write_uuid, packet, response=False)
+                        for i, piece in enumerate(decoder.split_write(packet)):
+                            if i and decoder.write_chunk_delay:
+                                await asyncio.sleep(decoder.write_chunk_delay)
+                            await self.client.write_gatt_char(self._write_uuid, piece, response=False)
                         _LOGGER.debug("Sent request %s", packet.hex())
+                        self._write_failure_logged = False
+                    if decoder.has_pending_requests:
+                        interval = decoder.request_interval
                 
                 await asyncio.sleep(interval)
                     
             except (BleakError, asyncio.TimeoutError) as ex:
-                _LOGGER.warning("Keepalive failed: %s", ex)
+                # Warn once per failure streak; a dead link would otherwise log every second.
+                if not self._write_failure_logged:
+                    _LOGGER.warning("Request write failed: %s", ex)
+                    self._write_failure_logged = True
+                else:
+                    _LOGGER.debug("Request write failed: %s", ex)
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 raise
@@ -370,20 +400,38 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     timeout=20.0,
                 )
 
+                self._requests_enabled.clear()
                 await self.client.connect()
                 _LOGGER.info("Successfully connected to %s (%s)", self.ble_device.address, self.ble_device.name)
 
                 # Ninebot/InMotion wheels only answer requests, so their protocol can't be
                 # detected from incoming data: pick it from the BLE name up front.
+                self._check_preselected_decoder()
                 if not self.decoder:
                     self._preselect_decoder_by_name()
-                if self.decoder:
-                    self.decoder.reset_session()
 
                 # Start notifications on the read characteristic
                 # We'll use NOTIFY_UUID as default, and switch once protocol is detected
                 read_uuid = self._read_uuid or NOTIFY_UUID
-                await self.client.start_notify(read_uuid, self._notification_handler)
+                try:
+                    await self.client.start_notify(read_uuid, self._notification_handler)
+                except BleakError:
+                    if not self._preselected:
+                        raise
+                    # The name-picked protocol's characteristic isn't there: forget
+                    # it and listen on the default characteristic instead.
+                    _LOGGER.warning(
+                        "Preselected %s has no characteristic %s; detecting from data",
+                        self.decoder.name if self.decoder else None, read_uuid,
+                    )
+                    self._drop_preselected_decoder()
+                    await self.client.start_notify(NOTIFY_UUID, self._notification_handler)
+
+                # Restart the protocol session only now that replies can arrive,
+                # so the first request of a handshake/probe isn't lost.
+                if self.decoder:
+                    self.decoder.reset_session()
+                self._requests_enabled.set()
                 
                 # Start keepalive task if required
                 self._ensure_keepalive_task()
@@ -411,20 +459,95 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.exception("Unexpected error in connection loop")
                 await asyncio.sleep(10)
 
-    def _preselect_decoder_by_name(self) -> None:
-        """Create the decoder from the BLE name for request-driven protocols."""
-        brand = match_brand_by_name(getattr(self.ble_device, "name", None))
-        if brand in (
+    def _wheel_name(self) -> str | None:
+        """BLE name, or the config entry title when a proxy reports no name."""
+        return getattr(self.ble_device, "name", None) or getattr(self.entry, "title", None)
+
+    def _gatt_service_uuids(self) -> set[str] | None:
+        """Service UUIDs of the connected wheel (None if unknown)."""
+        services = getattr(self.client, "services", None)
+        if not services:
+            return None
+        try:
+            return {str(service.uuid).lower() for service in services}
+        except (TypeError, AttributeError, BleakError):
+            return None
+
+    def _preselect_brand(self) -> WheelBrand | None:
+        """Request-driven brand from the BLE name, checked against GATT services.
+
+        InMotion V2 and Ninebot Z use the Nordic UART service, InMotion V1 the
+        FFE5 write service and Ninebot One FFE0 (const.py; ui/a.java). When the
+        services are known they settle V1/V2 and One/Z, and veto a name match
+        whose service is missing.
+        """
+        brand = match_brand_by_name(self._wheel_name())
+        if brand not in (
             WheelBrand.NINEBOT, WheelBrand.NINEBOT_Z,
             WheelBrand.INMOTION, WheelBrand.INMOTION_V2,
         ):
-            self.decoder = get_decoder_by_brand(brand)
-            _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
-            self._setup_uuids_for_brand(brand)
+            return None
+        services = self._gatt_service_uuids()
+        if services is None:
+            return brand
+        nus = INMOTION_V2_SERVICE_UUID in services
+        if brand in (WheelBrand.INMOTION, WheelBrand.INMOTION_V2):
+            if nus:
+                return WheelBrand.INMOTION_V2
+            if INMOTION_WRITE_SERVICE_UUID in services:
+                return WheelBrand.INMOTION
+            return None
+        if nus and NINEBOT_SERVICE_UUID not in services:
+            return WheelBrand.NINEBOT_Z
+        if NINEBOT_SERVICE_UUID in services and not nus:
+            return WheelBrand.NINEBOT
+        return brand if (nus or NINEBOT_SERVICE_UUID in services) else None
+
+    def _preselect_decoder_by_name(self) -> None:
+        """Create the decoder from the BLE name for request-driven protocols."""
+        if self._preselect_disabled:
+            return
+        brand = self._preselect_brand()
+        if brand is None:
+            return
+        self.decoder = get_decoder_by_brand(brand)
+        self._preselected = True
+        self._connects_without_data = 0
+        _LOGGER.info("Protocol preselected from BLE name: %s", self.decoder.name)
+        self._setup_uuids_for_brand(brand)
+
+    def _drop_preselected_decoder(self) -> None:
+        """Forget a name-picked decoder for good and fall back to data detection."""
+        self.decoder = None
+        self._preselected = False
+        self._preselect_disabled = True
+        self._setup_uuids_for_brand(WheelBrand.UNKNOWN)
+
+    def _check_preselected_decoder(self) -> None:
+        """Drop a preselected decoder after several connections with no decoded packet."""
+        if not self._preselected or not self.decoder:
+            return
+        if self.decoder.packet_count > 0:
+            self._preselected = False   # confirmed; treat like a detected decoder
+            return
+        self._connects_without_data += 1
+        if self._connects_without_data > self.PRESELECT_MAX_EMPTY_CONNECTS:
+            _LOGGER.warning(
+                "%s decoded nothing in %d connections; detecting the protocol from data",
+                self.decoder.name, self.PRESELECT_MAX_EMPTY_CONNECTS,
+            )
+            self._drop_preselected_decoder()
 
     def _detection_matches_name(self, decoder: EucDecoder) -> bool:
-        """Reject a data-based detection that contradicts a passive brand's BLE name."""
-        hint = match_brand_by_name(getattr(self.ble_device, "name", None))
+        """Reject a data-based detection that contradicts a passive brand's BLE name.
+
+        A Veteran (DC 5A 5C) detection is always accepted: that header can't
+        come from another brand, and EUC World itself switches a wheel it took
+        for a Gotway to Veteran on seeing it (wh/s.java h()).
+        """
+        if decoder.brand in (WheelBrand.VETERAN, WheelBrand.LEAPERKIM):
+            return True
+        hint = match_brand_by_name(self._wheel_name())
         passive = {
             WheelBrand.VETERAN: (WheelBrand.VETERAN, WheelBrand.LEAPERKIM),
             WheelBrand.KINGSONG: (WheelBrand.KINGSONG,),
@@ -485,6 +608,9 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_connected_time.isoformat() if self.last_connected_time else "None"
         )
         self._schedule_save()
+
+        # Stop the request loop until the next connection enables notifications
+        self._requests_enabled.clear()
 
         # Clear the device available event so we wait for it to be rediscovered
         self._device_available.clear()
