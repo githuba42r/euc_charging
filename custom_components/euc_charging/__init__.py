@@ -48,6 +48,7 @@ async def _async_setup_tpms_entry(hass: HomeAssistant, entry: ConfigEntry) -> bo
     """Set up a TPMS sensor entry (advertisement listener only)."""
     coordinator = TpmsCoordinator(hass, entry.data[CONF_ADDRESS])
     coordinator.async_start()
+    entry.async_on_unload(coordinator.async_shutdown)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     await hass.config_entries.async_forward_entry_setups(entry, TPMS_PLATFORMS)
