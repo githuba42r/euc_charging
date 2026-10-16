@@ -1,7 +1,9 @@
 """Constants for the EUC Charging integration."""
 
 import re
+from collections.abc import Mapping
 from enum import Enum
+from typing import Any
 
 DOMAIN = "euc_charging"
 
@@ -144,37 +146,53 @@ STORAGE_SAVE_DELAY = 30
 
 def sanitize_wheel_id(device_name: str) -> str:
     """Extract and sanitize wheel identifier from Bluetooth device name.
-    
+
     Examples:
         "LK3336" -> "lk3336"
         "Sherman-L" -> "sherman_l"
         "KS-16X" -> "ks_16x"
         "My Veteran Wheel" -> "my_veteran_wheel"
-    
+
     Args:
         device_name: The Bluetooth device name
-        
+
     Returns:
         Sanitized identifier suitable for entity IDs
     """
     if not device_name:
         return "euc"
-    
+
     # Convert to lowercase
     sanitized = device_name.lower()
-    
+
     # Replace spaces and hyphens with underscores
     sanitized = re.sub(r'[\s\-]+', '_', sanitized)
-    
+
     # Remove any characters that aren't alphanumeric or underscore
     sanitized = re.sub(r'[^a-z0-9_]', '', sanitized)
-    
+
     # Remove leading/trailing underscores
     sanitized = sanitized.strip('_')
-    
+
     # If empty after sanitization, use default
     if not sanitized:
         return "euc"
-    
+
     return sanitized
+
+
+# TPMS (Motoeye "VD" BLE advertisement sensors)
+CONF_ENTRY_TYPE = "entry_type"
+ENTRY_TYPE_TPMS = "tpms"
+CONF_WHEEL_ADDRESS = "wheel_address"
+CONF_MIN_PRESSURE_PSI = "min_pressure_psi"
+DEFAULT_MIN_PRESSURE_PSI = 30.0
+TPMS_MANUFACTURER_ID = 0x3000
+TPMS_LOW_BATTERY_PERCENT = 20
+KPA_PER_PSI = 6.894757
+
+
+def is_tpms_entry(data: Mapping[str, Any]) -> bool:
+    """Return True if config entry data describes a TPMS sensor."""
+    return data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_TPMS
 
