@@ -333,3 +333,15 @@ def test_veteran_detection_always_accepted(name):
 def test_kingsong_named_wheel_still_rejects_gotway_detection():
     c = coordinator("KS-S18")
     assert not c._detection_matches_name(GotwayDecoder())
+
+
+@pytest.mark.parametrize("telemetry, expected", [
+    ({"is_charging": True}, True),                                   # Veteran (no key)
+    ({"is_charging": True, "charging_method": "flag"}, True),
+    ({"is_charging": True, "charging_method": "inferred_current"}, True),
+    ({"is_charging": True, "charging_method": "inferred_voltage"}, False),
+    ({"is_charging": False, "charging_method": "flag"}, False),
+    ({"is_charging": None}, False),
+])
+def test_only_trusted_charging_feeds_estimates(telemetry, expected):
+    assert coord_mod._charging_for_estimates(telemetry) is expected

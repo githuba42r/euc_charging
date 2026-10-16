@@ -64,6 +64,19 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _charging_for_estimates(telemetry: dict[str, Any]) -> bool:
+    """Charging state trusted enough to drive charge-time estimates.
+
+    A wheel-reported flag (Veteran has no charging_method key; Ninebot and
+    InMotion V2 say "flag") or the sustained negative-current inference. The
+    voltage-rise inference is too easily fooled to produce ETAs.
+    """
+    if not telemetry.get("is_charging"):
+        return False
+    method = telemetry.get("charging_method")
+    return method is None or method in ("flag", "inferred_current")
+
+
 def _known(value: Any, fallback: Any) -> Any:
     """Return value unless the protocol couldn't provide it (None)."""
     return fallback if value is None else value
@@ -792,7 +805,7 @@ class EucChargingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 battery_percent = telemetry.get("battery_percent")
                 estimates = self.charge_tracker.update(
                     battery_percent if battery_percent is not None else 0,
-                    bool(telemetry.get("is_charging")) and battery_percent is not None,
+                    _charging_for_estimates(telemetry) and battery_percent is not None,
                     telemetry.get("voltage") or 0,
                 )
                 telemetry["charge_estimates"] = estimates
